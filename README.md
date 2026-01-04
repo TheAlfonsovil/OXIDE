@@ -4,6 +4,18 @@ Whitepaper institucional: preciso, sin hype, orientado a comités de riesgo, aud
 
 ---
 
+## Parámetros duros (cheatsheet)
+- Supply inicial: 1,000,000,000,000,000 OXD (6 decimales); 10k libres, resto staked del creador.
+- Función de burn (lazy): $\text{burn}=\text{balance}\_{free}\times0.20\times\tfrac{t}{\text{año}}$ aplicada al interactuar; fracciones acumuladas en `burn_fraction_remainder` (u128).
+- Grace técnica: 15 minutos (`elapsed<=900s`); fuera de ventana, `clear_debt()` antes de transferir.
+- Stake: 0% decay; volver a libre reinicia reloj en `now`.
+- Vesting creador: 0.1% del volumen con cap diario 1% del supply; `unstake` del creador prohibido.
+- Whitelist fija: pools Raydium V4, Orca Whirlpool, Meteora DLMM como zona franca.
+- Coste de activación: `TrackingAccount` por wallet (~0.002 SOL), pagado por el emisor en la primera recepción.
+- Inmutabilidad: sin multisig ni upgrade; cambios requieren nuevo deploy.
+
+---
+
 ## Executive Summary (≤1 página)
 - **Tesis**: OXIDE es un activo no rendidor cuyo suministro efectivo se contrae sobre saldos libres (máx. 20% anual) y se preserva en stake (0% burn). Incentiva compromiso activo de capital y penaliza ociosidad sin depender de decisiones humanas.
 - **Posicionamiento**: instrumento monetario programático, sin yield, sin governance, sin upgrade, no estable. Diseñado para holders de largo plazo y operadores que limpien deuda o actúen dentro de 15m.
@@ -38,7 +50,7 @@ Whitepaper institucional: preciso, sin hype, orientado a comités de riesgo, aud
 
 ## 3. Diseño monetario (time-decay correcto)
 - **Ámbito del burn**: solo `balance_free`; excluye `balance_staked` y saldos en pools whitelisted.
-- **Proporcionalidad temporal**: burn lineal, máximo 20% anual; p.ej., 30 días inactivo ≈1.64% del saldo libre.
+- **Proporcionalidad temporal (lazy burn)**: $\text{burn}=\text{balance}\_{free}\times0.20\times\tfrac{t}{\text{año}}$; p.ej., 30 días inactivo ≈1.64% del saldo libre.
 - **Conservación de fracciones**: `burn_fraction_remainder` (u128) evita exploits por partición.
 - **Sin yield**: no hay reparto de fees ni intereses; la posible apreciación deriva de reducción de unidades.
 - **Refugio**: stake = 0% burn; al volver a libre, reloj reinicia en `now`.
@@ -48,8 +60,8 @@ Whitepaper institucional: preciso, sin hype, orientado a comités de riesgo, aud
 ## 4. Transfer Hook, tracking y ventana de gracia (15m)
 - **Validación**: cada transfer SPL pasa por `transfer_hook`; si emisor no-pool y `elapsed>900s`, revierte con `DebtNotCleared` hasta `clear_debt()`.
 - **Herencia de antigüedad**: receptor hereda timestamp ponderado; evita lavado de tokens viejos.
-- **Zona franca**: compras desde Raydium V4 / Orca Whirlpool / Meteora DLMM asignan timestamp `now` al comprador.
-- **Inicialización**: `TrackingAccount` en primera recepción; costo ~0.002 SOL, pagado por el emisor.
+- **Zona franca**: compras desde Raydium V4 / Orca Whirlpool / Meteora DLMM asignan timestamp `now` al comprador; si sender es pool whitelisted, no se valida `elapsed`.
+- **Inicialización**: `TrackingAccount` en primera recepción; costo ~0.002 SOL, pagado por el emisor; la TX falla si no tiene SOL.
 - **Racional 15m**: reduce fricción operativa sin eliminar deuda económica (sigue acumulando sobre saldo libre).
 
 ---
@@ -114,7 +126,12 @@ Whitepaper institucional: preciso, sin hype, orientado a comités de riesgo, aud
 - **DEX/agregadores**: empaquetar `clear_debt + swap` si `elapsed>900s`; respetar whitelist (Raydium V4, Orca Whirlpool, Meteora DLMM).
 - **Lending/derivados**: colateral en stake para 0% decay; si se retira como SPL, considerar timestamp heredado.
 - **Market makers/bots**: cachear contrapartes para minimizar activaciones; rotar wallets no limpia antigüedad.
-- **Bridges/custodios**: mover a otra L1 pierde tracking/antigüedad; documentar; mantener SOL para redenciones.
+- **Bridges/custodios**: los tokens quedan lockeados en Solana con su `TrackingAccount`; el tiempo sigue contando. Al redimir, el custodio debe ejecutar `clear_debt()` (y pagar SOL) antes de devolver; el receptor recibe el saldo post-burn. Documentar este flujo; sin SOL o sin `clear_debt` la redención revierte.
+- **Perfiles y patrones**:
+	- Bots/MM intra-15m: operar desde pools whitelisted para entrar limpios; si inmovilizan >15m, `clear_debt` antes de mover inventario; prefundear SOL para inicializar contrapartes nuevas.
+	- DCA recurrente: cada compra desde pool entra con timestamp `now`; stake inmediato para 0% decay mientras acumulas; al vender tras >15m, `clear_debt` primero.
+	- Holder largo: mantener en stake; si pasas a libre y superas 15m, limpia deuda antes de vender o re-stakear.
+	- Custodios/CEX: programar `clear_debt` periódico sobre la cuenta de custodia; mantener SOL para redenciones y para activar tracking de destinatarios.
 
 ---
 
