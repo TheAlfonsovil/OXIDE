@@ -1,0 +1,85 @@
+LANZAMIENTO ÚNICO DE OXIDE EN MAINNET
+=====================================
+
+Objetivo: evitar un brick en mainnet. El mint se crea solo después de que ambos programas estén deployados y verificados, y la autoridad se mueve al PDA global solo cuando todo está en su sitio.
+
+FASE 0 – Preparación (sin crear mint)
+- Verifica herramientas (una vez):
+  rustc --version
+  anchor --version
+  solana --version
+  spl-token --version
+- Instala dependencias JS fijadas (sin ^ ni ~):
+  pnpm install --frozen-lockfile  # genera/usa lockfile
+- Configura keypair y balance (mainnet-beta):
+  solana-keygen new -o <KEYPAIR_PATH>  # o usa tu ledger/clave existente
+  solana config set --url https://api.mainnet-beta.solana.com
+  solana config set --keypair <KEYPAIR_PATH>
+  solana address   # confirma la pubkey
+  solana balance   # >= 0.2 SOL recomendado
+- Asegura código base correcto en lib.rs y hook_lib.rs. Los Program IDs se fijan con anchor build/deploy; no crees mint aún.
+
+FASE 1 – Deploy (fija Program IDs primero)
+4) anchor build
+5) anchor deploy --provider.cluster mainnet-beta   # programa OXIDE
+6) anchor deploy --provider.cluster mainnet-beta   # programa Hook (oxide_transfer_hook)
+7) Verifica IDs grabados:
+   anchor keys list
+   solana program show <programId>
+   solana program show <hookId>
+
+FASE 2 – Mint Token-2022 (inmediato transferHook)
+8) Crea el mint Token-2022 (6 decimales) usando los IDs ya fijos:
+   spl-token create-token --token-program TokenzQdBnEtFd5Ki41mKq3d8bHPG8LML7jn1RybmZ8u --decimals 6
+   # Guarda el <mintAddress> resultante.
+9) Activa al instante la extensión transferHook en el mint:
+   spl-token initialize-mint-extension <mintAddress> transferHook <hookId>
+
+FASE 3 – Autoridades (solo con programas enchain)
+10) Calcula GLOBAL_PDA (seeds ["global"] con programId OXIDE):
+  pnpm run pda:global -- --program <programId>
+
+Punto de no retorno
+- Antes del paso 11: tras mover la mint authority, si el código tuviera un bug deberás crear un mint nuevo y migrar; no hay undo seguro.
+
+11) Transfiere mint authority → GLOBAL_PDA (programa ya on-chain):
+    spl-token authorize <mintAddress> mint <GLOBAL_PDA>
+12) Verifica que la autoridad quedó en el PDA global:
+    spl-token account-info <mintAddress>   # busca "Mint authority: <GLOBAL_PDA>"
+
+FASE 4 – Inicialización on-chain
+13) initialize_global (programa OXIDE):
+  pnpm run init:global -- --program <programId> --mint <mintAddress> --keypair <KEYPAIR_PATH> --rpc https://api.mainnet-beta.solana.com --idl target/idl/oxide.json
+    # Esperado: supply externo 0; supply interno 1,000,000,000,000 OXD staked.
+14) verify_mint_authority (programa OXIDE):
+  pnpm run verify:mint -- --program <programId> --mint <mintAddress> --keypair <KEYPAIR_PATH> --rpc https://api.mainnet-beta.solana.com --idl target/idl/oxide.json
+    # Sin esto withdraw() fallará.
+15) initialize_extra_account_meta_list (programa Hook):
+  pnpm run init:hook -- --hook-id <hookId> --program <programId> --mint <mintAddress> --keypair <KEYPAIR_PATH> --rpc https://api.mainnet-beta.solana.com --idl target/idl/oxide_transfer_hook.json
+
+Airdrop / distribución inicial
+- Usa genesis_airdrop (programa OXIDE) firmado por authority. Máx 1000 llamadas, cap diario 1% supply aplicado en release_creator_tokens. Amount en unidades enteras (6 decimales implícitos).
+- Para wallets sin cuenta previa, usa transfer_to_uninitialized o deposita/mintea y transfiere SPL desde el mint account del creador.
+
+Seguridad y bloqueo de upgrades
+- Tras auditar on-chain, inmoviliza upgrades:
+  solana program set-upgrade-authority <programId OXIDE> --final
+  solana program set-upgrade-authority <hookId> --final
+- Esto hace el bytecode inmutable. Ejecuta solo cuando estés listo.
+
+Mint y freeze authority
+- La mint authority pasa al PDA global en el paso 11. No la dejes en null si planeas permitir withdraw(); el programa requiere ser mint_authority para mintear recibos.
+- No se usa freeze authority; no congeles cuentas. El mint Token-2022 se crea sin freeze.
+
+Wallet principal y backups
+- Guarda la keypair usada en <KEYPAIR_PATH> de forma segura (offline). Sin ella no podrás firmar initialize_global/verify_mint_authority ni upgrades antes de congelarlos.
+
+Verificación rápida
+- solana address
+- solana balance
+- anchor keys list   # muestra program IDs
+- spl-token account-info <mintAddress>
+
+Fallback si falla algo
+- Si el build falla: revisa versiones de rust/cargo/anchor; el hook comparte Cargo.toml del programa principal.
+- Si faltan fondos: fondea la keypair y repite pasos posteriores. No recrees el mint si ya existe.
