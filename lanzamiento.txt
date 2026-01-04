@@ -4,6 +4,15 @@ LANZAMIENTO ÚNICO DE OXIDE EN MAINNET
 Objetivo: evitar un brick en mainnet. El mint se crea solo después de que ambos programas estén deployados y verificados, y la autoridad se mueve al PDA global solo cuando todo está en su sitio.
 
 FASE 0 – Preparación (sin crear mint)
+- Ejecuta todos los comandos siguientes dentro de WSL Ubuntu (no PowerShell) para evitar fallos de BPF.
+- Instala herramientas en Windows (WSL2 Ubuntu 22.04 recomendado; evitar builds nativos de Windows que rompan BPF):
+  1) Instala WSL2 y Ubuntu 22.04: wsl --install -d Ubuntu-22.04 (reinicia).
+  2) Dependencias de compilación: sudo apt update && sudo apt install -y build-essential pkg-config libssl-dev libudev-dev clang git curl
+  3) Node.js 20 LTS + pnpm: curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt install -y nodejs && corepack enable && corepack prepare pnpm@8 --activate
+  4) Rust toolchain: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source $HOME/.cargo/env && rustup default stable && rustup target add bpfel-unknown-unknown
+  5) Solana CLI 1.18.x: sh -c "$(curl -sSfL https://release.solana.com/v1.18.21/install)" && export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+  6) Anchor 0.29.0: cargo install --git https://github.com/coral-xyz/anchor avm --locked && avm use 0.29.0
+  7) Verifica que ~/.cargo/bin y ~/.local/share/solana/install/active_release/bin estén en PATH (añádelos a ~/.bashrc).
 - Verifica herramientas (una vez):
   rustc --version
   anchor --version
@@ -11,6 +20,7 @@ FASE 0 – Preparación (sin crear mint)
   spl-token --version
 - Instala dependencias JS fijadas (sin ^ ni ~):
   pnpm install --frozen-lockfile  # genera/usa lockfile
+  # Tras pnpm install, corre anchor build dentro de WSL para generar target/idl/*.json antes del deploy.
 - Configura keypair y balance (mainnet-beta):
   solana-keygen new -o <KEYPAIR_PATH>  # o usa tu ledger/clave existente
   solana config set --url https://api.mainnet-beta.solana.com
