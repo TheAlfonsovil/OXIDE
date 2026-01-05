@@ -18,6 +18,8 @@ FASE 0 – Preparación (sin crear mint)
   anchor --version
   solana --version
   spl-token --version
+  pnpm install --frozen-lockfile   # genera/usa lockfile; evita drift
+  anchor build                     # genera target/idl/*.json en WSL/Ubuntu
 - Instala dependencias JS fijadas (sin ^ ni ~):
   pnpm install --frozen-lockfile  # genera/usa lockfile
   # Tras pnpm install, corre anchor build dentro de WSL para generar target/idl/*.json antes del deploy.
@@ -67,9 +69,13 @@ FASE 4 – Inicialización on-chain
 15) initialize_extra_account_meta_list (programa Hook):
   pnpm run init:hook -- --hook-id <hookId> --program <programId> --mint <mintAddress> --keypair <KEYPAIR_PATH> --rpc https://api.mainnet-beta.solana.com --idl target/idl/oxide_transfer_hook.json
 
+Smoke test post-deploy (mainnet-beta, monto mínimo):
+- Ejecuta clear_debt sobre la cuenta del deployer y haz un swap pequeño vía pool whitelisted para validar hook/PDAs antes del anuncio público.
+
 Airdrop / distribución inicial
 - Usa genesis_airdrop (programa OXIDE) firmado por authority. Máx 1000 llamadas, cap diario 1% supply aplicado en release_creator_tokens. Amount en unidades enteras (6 decimales implícitos).
 - Para wallets sin cuenta previa, usa transfer_to_uninitialized o deposita/mintea y transfiere SPL desde el mint account del creador.
+- Recordatorio: el primer envío a una wallet nueva requiere que el emisor tenga ~0.002 SOL para crear su TrackingAccount (costo único; la TX falla si no hay SOL suficiente).
 
 Seguridad y bloqueo de upgrades
 - Tras auditar on-chain, inmoviliza upgrades:

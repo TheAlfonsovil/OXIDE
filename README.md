@@ -63,6 +63,7 @@ Whitepaper institucional: preciso, sin hype, orientado a comités de riesgo, aud
 - **Zona franca**: compras desde Raydium V4 / Orca Whirlpool / Meteora DLMM asignan timestamp `now` al comprador; si sender es pool whitelisted, no se valida `elapsed`.
 - **Inicialización**: `TrackingAccount` en primera recepción; costo ~0.002 SOL, pagado por el emisor; la TX falla si no tiene SOL.
 - **Racional 15m**: reduce fricción operativa sin eliminar deuda económica (sigue acumulando sobre saldo libre).
+- **⚠️ Limitación delegates**: La whitelist solo funciona para **transfers directos** donde la pool authority es signer. Delegate transfers (ej: Jupiter multi-hop, bots custom) NO están whitelisted y deben llamar `clear_debt()` antes de transferir desde pools. Los DEXs mainstream (Raydium/Orca/Meteora) usan transfers directos para swaps normales. Ver [TECHNICAL.md](TECHNICAL.md#amm-whitelist--delegate-transfers) para detalles.
 
 ---
 
@@ -78,7 +79,13 @@ Whitepaper institucional: preciso, sin hype, orientado a comités de riesgo, aud
 ## 6. Vesting del creador e inmutabilidad
 - **Liberación**: `tokens_to_release = amount_traded × 0.1%`, cap diario 1% del supply total, no más que el balance staked restante.
 - **Bloqueo de unstake**: cualquier `unstake` del creador revierte (anti-rugpull).
-- **Génesis airdrops**: máx. 1000, consumen `balance_staked` del creador; contador público.
+- **Génesis airdrops (EXCEPCIÓN CONTROLADA)**: 
+  - **Único método** donde el creador puede liberar tokens manualmente
+  - Límites de seguridad: máx. 100 OXD por airdrop, máx. 1000 airdrops lifetime
+  - **NO respeta cap diario** (diseñado para siembra inicial rápida a early adopters)
+  - Total máximo posible: 100,000 OXD (0.01% del supply inicial)
+  - Propósito: Distribuir a early adopters en la fase genesis sin esperar volumen de trading
+  - Consume `balance_staked` del creador; contador público `genesis_airdrops_given`
 - **Inmutabilidad**: sin multisig ni governance; whitelist hardcoded; cambios implican nuevo despliegue y migración voluntaria.
 
 ---

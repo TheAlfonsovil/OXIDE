@@ -1,0 +1,453 @@
+═══════════════════════════════════════════════════════════════════════════════
+  OXIDE DEVNET DEPLOYMENT CHECKLIST
+═══════════════════════════════════════════════════════════════════════════════
+
+PRE-DEPLOYMENT (Local Testing)
+───────────────────────────────────────────────────────────────────────────────
+
+1. GENERATE PROGRAM KEYPAIRS
+   
+   $ solana-keygen new -o oxide-program.json
+   $ solana-keygen new -o hook-program.json 
+   
+   ⚠️ SAVE THESE KEYPAIRS SECURELY - You'll need them for IDL updates
+   
+   Store the pubkeys:
+   - OXIDE_PROGRAM_ID=$(solana address -k oxide-program.json)
+   - HOOK_PROGRAM_ID=$(solana address -k hook-program.json)
+   
+   Output example:
+   OXIDE_PROGRAM_ID=5amCTzFY...
+   HOOK_PROGRAM_ID=HookProg...
+
+
+2. UPDATE PROGRAM IDs IN SOURCE CODE
+   
+   In lib.rs (OXIDE main program):
+   - Line 16: declare_id!("YOUR_OXIDE_PROGRAM_ID_HERE");
+   
+   In hook_lib.rs (Transfer Hook):
+   - Line 15: declare_id!("YOUR_HOOK_PROGRAM_ID_HERE");
+   
+   In lib.rs (OXIDE constants):
+   - Line 20: const HOOK_PROGRAM_ID: Pubkey = pubkey!("YOUR_HOOK_PROGRAM_ID_HERE");
+   
+   Example:
+   declare_id!("5amCTzFY1j7PSfKfb4vvCvQeJJPXwRBCaZBVL8PZM4qV");
+
+
+3. RUN ALL TESTS LOCALLY (IN THIS ORDER)
+   
+   Step A: Unit tests (fast, < 1 second)
+   $ cargo test --test unit_tests -- --nocapture
+   
+   Expected: ✅ ALL PASS
+   - Burn calculations (basic, zero, 1 day, max u64, fractional)
+   - Timestamp tracking (weighted average, reset, inheritance)
+   - Grace period logic (14:59, 15:00, 15:01 boundaries)
+   - Supply caps (genesis 1000, daily 1%)
+   
+   
+   Step B: Edge case tests (CRITICAL, < 10 seconds)
+   $ cargo test --test edge_case_tests -- --nocapture --test-threads=1
+   
+   Expected: ✅ ALL PASS (Most important test suite)
+   🔴 CRITICAL TESTS:
+   - edge_case_max_u64_balance           → No overflow on max balance
+   - edge_case_elapsed_negative          → Clock regression safe
+   - edge_case_timestamp_overflow        → u64::MAX timestamps safe
+   - edge_case_grace_period_boundary     → Exactly 15 min handling
+   - edge_case_hook_program_id_immutable → Security constant
+   
+   
+   Step C: Integration tests (with local validator)
+   $ anchor test --skip-build
+   
+   Expected output:
+   ✅ test_deposit_synchronizes_with_hook: PASS
+   ✅ test_withdraw_applies_burn: PASS
+   ✅ test_clear_debt_resets_timestamp: PASS
+   ✅ test_pool_transfer_whitelist_bypass: PASS
+   ✅ test_user_transfer_applies_burn: PASS
+   ✅ test_delegate_transfer_blocked: PASS
+   ✅ test_weighted_average_timestamp_inheritance: PASS
+   ✅ test_hook_program_id_validation: PASS
+   ✅ test_genesis_airdrop_with_1000_wallets: PASS
+   ✅ test_daily_release_cap_enforced: PASS
+   ✅ test_mint_authority_verification: PASS
+   ✅ test_invalid_mint_rejected: PASS
+   
+   ⚠️ Do NOT proceed to DEVNET if any test fails
+
+
+4. LINT & SECURITY CHECK
+   
+   $ cargo clippy --all-targets
+   $ cargo audit
+   $ anchor test --features anchor-debug (optional, for debugging)
+
+
+5. BUILD FOR DEVNET
+   
+   $ anchor build
+   
+   Output:
+   Build successful ✅
+   - target/deploy/oxide.so
+   - target/deploy/oxide_transfer_hook.so
+
+
+───────────────────────────────────────────────────────────────────────────────
+DEVNET DEPLOYMENT
+───────────────────────────────────────────────────────────────────────────────
+
+6. CONFIGURE SOLANA CLI FOR DEVNET
+   
+   $ solana config set --url https://api.devnet.solana.com
+   $ solana config get
+   
+   Output should show:
+   RPC URL: https://api.devnet.solana.com
+   WebSocket URL: wss://api.devnet.solana.com/ (computed)
+   Keypair Path: ~/.config/solana/id.json
+   Commitment: confirmed
+
+
+7. REQUEST DEVNET SOL
+   
+   $ solana airdrop 10 $(solana address -k oxide-program.json)
+   $ solana airdrop 10 $(solana address -k hook-program.json)
+   
+   Wait for airdrops to confirm:
+   $ solana balance $(solana address -k oxide-program.json)
+   $ solana balance $(solana address -k hook-program.json)
+   
+   Both should show ~10 SOL
+
+
+8. DEPLOY HOOK PROGRAM FIRST
+   
+   ⚠️ CRITICAL: Deploy hook_lib.rs BEFORE lib.rs (hook is dependency)
+   
+   $ solana program deploy \
+     --program-id hook-program.json \
+     target/deploy/oxide_transfer_hook.so \
+     --url https://api.devnet.solana.com
+   
+   Output example:
+   Program deployed successfully to HookProg...
+   
+   Verify:
+   $ solana program show --url https://api.devnet.solana.com HookProg...
+
+
+9. DEPLOY OXIDE PROGRAM
+   
+   $ solana program deploy \
+     --program-id oxide-program.json \
+     target/deploy/oxide.so \
+     --url https://api.devnet.solana.com
+   
+   Output example:
+   Program deployed successfully to 5amCTzFY...
+   
+   Verify:
+   $ solana program show --url https://api.devnet.solana.com 5amCTzFY...
+
+
+10. CREATE SPL TOKEN-2022 WITH TRANSFER HOOK
+    
+    $ spl-token create-token \
+      --program-id TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPvLZ8 \
+      --transfer-hook HookProg... \
+      --mint-authority $(solana address -k oxide-program.json) \
+      --url https://api.devnet.solana.com
+    
+    Output:
+    Creating token MINT_ID...
+    Signature: ...
+    Token address: YOUR_MINT_ID
+    
+    Save the MINT_ID for later steps
+
+
+11. INITIALIZE GLOBAL STATE
+    
+    Use oxide_cli.py:
+    $ python cli/oxide_cli.py \
+      --program-id 5amCTzFY... \
+      --mint YOUR_MINT_ID \
+      --url https://api.devnet.solana.com \
+      init-global
+    
+    Or via direct transaction (from tests/integration_tests.rs):
+    ```rust
+    let tx = initialize_global_state(
+        &program,
+        &mint,
+        &mint_authority_account,
+        &global_state_account,
+    ).await.unwrap();
+    println!("Global state initialized: {}", tx.signature);
+    ```
+
+
+12. VERIFY HOOK IS ACTIVE
+    
+    $ spl-token display YOUR_MINT_ID \
+      --url https://api.devnet.solana.com
+    
+    Output should show:
+    Transfer Hook Program ID: HookProg...
+    ✅ Hook is active on token
+
+
+───────────────────────────────────────────────────────────────────────────────
+TESTING ON DEVNET
+───────────────────────────────────────────────────────────────────────────────
+
+13. RUN INTEGRATION TESTS AGAINST DEVNET
+    
+    Update Anchor.toml to use DEVNET provider:
+    [provider]
+    cluster = "devnet"
+    
+    Run tests:
+    $ cargo test --test integration_tests -- --nocapture --test-threads=1
+    
+    Or with anchor:
+    $ anchor test --provider.cluster devnet
+    
+    Expected test sequence:
+    1. Test: Deposit 1,000 OXD → verify balance ✅
+    2. Test: Wait 15 minutes → Transfer to alice → verify tracking account ✅
+    3. Test: Withdraw 500 OXD → verify burn applied ✅
+    4. Test: Clear debt → verify time reset ✅
+    5. Test: Pool transfer (Raydium whitelist) → 0% burn ✅
+    6. Test: Delegate transfer → DebtNotCleared error ✅
+    7. Test: Pool transfer shows zero decay ✅
+    8. Test: User transfer applies burn ✅
+    9. Test: Weighted average timestamp inheritance ✅
+    10. Test: Hook program ID validation ✅
+    11. Test: Genesis airdrop with 1000 wallets ✅
+    12. Test: Daily release cap enforced ✅
+    13. Test: Mint authority verification ✅
+    14. Test: Invalid mint rejected ✅
+
+
+14. MONITOR COMPUTE UNITS (CU USAGE)
+    
+    Each transaction should use < 200,000 CUs:
+    - Transfer: ~150k CU
+    - Withdraw: ~180k CU
+    - Deposit: ~170k CU
+    - Clear debt: ~160k CU
+    
+    Check actual usage:
+    $ solana transaction-history YOUR_SIGNATURE \
+      --url https://api.devnet.solana.com
+    
+    If any transaction > 200k CU:
+    ❌ FAIL - Optimize code
+    ✅ PASS - Ready for production
+
+
+15. LOAD TESTING (OPTIONAL)
+    
+    Create 100 test wallets and perform concurrent transactions:
+    $ python tests/load_test.py \
+      --program-id 5amCTzFY... \
+      --mint YOUR_MINT_ID \
+      --wallets 100 \
+      --transactions-per-wallet 10
+    
+    Monitor:
+    - Transaction success rate (target: 100%)
+    - Average block time (target: < 5 seconds)
+    - Failure reasons (none expected)
+
+
+───────────────────────────────────────────────────────────────────────────────
+POOL TESTING (RAYDIUM/ORCA/METEORA)
+───────────────────────────────────────────────────────────────────────────────
+
+16. CREATE RAYDIUM V4 POOL (DEVNET)
+    
+    Prerequisites:
+    - OXD token deployed
+    - USDC token on devnet (or create test USDC)
+    - 1,000,000 OXD initial liquidity
+    - 10,000 USDC initial liquidity
+    
+    $ raydium-cli pool create \
+      --token-a YOUR_MINT_ID \
+      --token-b USDC_MINT \
+      --liquidity-a 1000000000000 \
+      --liquidity-b 10000000000 \
+      --url https://api.devnet.solana.com
+    
+    Output:
+    Pool created: RAYDIUM_POOL_ID
+    ✅ Pool is whitelisted in hook (0% decay)
+
+
+17. TEST POOL TRANSFERS (0% BURN)
+    
+    User -> Pool -> Alice:
+    1. Deposit 1,000 OXD to user account
+    2. Swap in Raydium: 1,000 OXD → ~USDC (transfer via pool)
+    3. Verify user's tracking account: timestamp reset (pool is whitelisted)
+    
+    Expected: NO burn applied (whitelist bypass)
+    
+    ```python
+    python cli/oxide_cli.py \
+      --program-id 5amCTzFY... \
+      --mint YOUR_MINT_ID \
+      deposit 1000
+    
+    # Manual transfer through Raydium pool
+    # Check tracking account - should show pool transfer
+    ```
+
+
+18. TEST USER-TO-USER TRANSFERS (20% BURN)
+    
+    Alice -> Bob (not whitelisted):
+    1. Alice deposits 1,000 OXD
+    2. Wait 15 minutes (> grace period)
+    3. Transfer 100 OXD to Bob
+    4. Verify burn calculated: 100 * (20% annual) * (time elapsed)
+    5. Verify Bob's tracking account: weighted average timestamp
+    
+    Expected: burn > 0
+
+
+19. TEST DELEGATE TRANSFER FAILURE
+    
+    Alice (with delegate) -> Bob:
+    1. Alice sets delegate for her account
+    2. Delegate tries to transfer Alice's tokens to Bob
+    3. Transaction should fail with: DebtNotCleared error
+    
+    Expected: ❌ FAIL (as designed)
+    
+    Workaround: clear_debt first
+    1. Call clear_debt() to reset timestamp
+    2. Now delegate transfer succeeds
+
+
+───────────────────────────────────────────────────────────────────────────────
+VALIDATION CHECKLIST
+───────────────────────────────────────────────────────────────────────────────
+
+✅ All unit tests pass locally
+✅ All integration tests pass on DEVNET
+✅ All edge case tests pass (especially max_u64 overflow)
+✅ CU usage < 200k per transaction
+✅ Pool transfers show 0% burn (whitelist working)
+✅ User transfers show burn (decay working)
+✅ Delegate transfers properly blocked (security)
+✅ Clear debt resets timestamp (recovery mechanism)
+✅ Burn remainder accumulation correct (fixed-point math)
+✅ Genesis airdrop limit enforced (1000 wallets)
+✅ Daily release cap enforced (1% of supply)
+✅ Clock regression handled gracefully (elapsed < 0)
+✅ Hook program validation working (HOOK_PROGRAM_ID constraint)
+✅ Invalid hook program rejected (security)
+
+
+───────────────────────────────────────────────────────────────────────────────
+POST-DEVNET SUMMARY
+───────────────────────────────────────────────────────────────────────────────
+
+If all tests pass:
+✅ OXIDE is ready for MAINNET deployment
+
+Document for mainnet:
+- OXIDE_PROGRAM_ID: [YOUR_ID]
+- HOOK_PROGRAM_ID: [YOUR_ID]
+- MINT_ID: [YOUR_ID]
+- Build timestamp: [DATE]
+- Git commit: [HASH]
+- Auditor notes: [IF APPLICABLE]
+
+
+═══════════════════════════════════════════════════════════════════════════════
+SUMMARY OF TEST SUITES
+═══════════════════════════════════════════════════════════════════════════════
+
+Four comprehensive test files in /tests directory:
+
+1. unit_tests.rs (Pure Rust logic, < 1 second)
+   - 40+ tests for burn calculations, timestamps, math, errors
+   - Run: cargo test --test unit_tests -- --nocapture
+   - No blockchain needed
+
+2. integration_tests.rs (Full program interactions, 10-30 seconds)
+   - 14+ tests for cross-program sync, hook triggers, whitelisting
+   - Run: anchor test --skip-build
+   - Requires local validator
+
+3. edge_case_tests.rs (Boundary conditions, CRITICAL, < 10 seconds)
+   - 20+ tests for overflow/underflow, extreme values, security
+   - Run: cargo test --test edge_case_tests -- --nocapture --test-threads=1
+   - No blockchain needed, but MOST IMPORTANT
+
+4. devnet_tests.rs (Live DEVNET cluster, 10-60 seconds)
+   - 40+ tests for RPC, actual program execution, real pools
+   - Run: CLUSTER=devnet cargo test --test devnet_tests -- --ignored --nocapture
+   - Requires DEVNET deployment
+
+
+COMPLETE TEST EXECUTION BEFORE DEVNET:
+
+Step 1: cargo test --test unit_tests -- --nocapture
+Step 2: cargo test --test edge_case_tests -- --nocapture --test-threads=1
+Step 3: anchor test --skip-build
+
+If all pass ✅ → Ready for DEVNET
+If any fail ❌ → Fix and re-test
+
+
+COMPLETE TEST EXECUTION AFTER DEVNET DEPLOYMENT:
+
+Step 1: cargo test --test integration_tests -- --nocapture
+Step 2: CLUSTER=devnet cargo test --test devnet_tests -- --ignored --nocapture --test-threads=1
+
+If all pass ✅ → Ready for MAINNET
+If any fail ❌ → Debug and fix
+
+
+See tests/README_TESTS.md for detailed documentation of all tests.
+
+═══════════════════════════════════════════════════════════════════════════════
+TROUBLESHOOTING
+═══════════════════════════════════════════════════════════════════════════════
+
+Issue: "Program failed to initialize" (InvalidHookProgram error)
+→ Solution: Verify HOOK_PROGRAM_ID constant matches deployed hook_lib.rs
+
+Issue: "Transaction exceeds CU limit"
+→ Solution: Optimize loops in apply_lazy_burn() or split into multiple txs
+
+Issue: "Pool transfer shows burn (should be 0%)"
+→ Solution: Verify pool is whitelisted in is_whitelisted_owner_program()
+
+Issue: "Transfer blocked with DebtNotCleared"
+→ Solution: Call clear_debt() first if using delegates
+
+Issue: "Genesis airdrop limit exceeded"
+→ Solution: Genesis airdrop is capped at 1000 wallets total - this is by design
+
+Issue: "Raydium/Orca pool not accepting OXD transfers"
+→ Solution: Ensure token has transfer hook enabled and pool is initialized
+
+Issue: "test_clock_regression_handling fails"
+→ CRITICAL: Verify elapsed < 0 is handled (if elapsed < 0 { elapsed = 0 })
+→ This edge case kills mainnet if not handled
+
+Issue: "test_burn_with_max_u64_balance panics"
+→ CRITICAL: Ensure u128 intermediate in burn calculation prevents overflow
+
+═══════════════════════════════════════════════════════════════════════════════

@@ -15,7 +15,9 @@ use spl_pod::optional_keys::OptionalNonZeroPubkey;
 
 declare_id!("OXIDExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
 
-const SECONDS_PER_YEAR: i64 = 365 * 24 * 60 * 60;
+// ⚠️ SECURITY: Hook program ID (must match hook_lib.rs declare_id)
+// Usado para validar que hook_program es el correcto en ClearDebt/Deposit/Withdraw
+const HOOK_PROGRAM_ID: Pubkey = pubkey!("HookxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxXXX");
 const ANNUAL_BURN_BP: u128 = 20_00; // 20.00% en basis points (10000 = 100%)
 const BURN_REM_SCALE: u128 = 1_000_000; // Fixed-point scale = 1 token unit (6 decimales)
 const INITIAL_SUPPLY: u64 = 1_000_000_000_000_000; // 1 BILLÓN de OXD (6 decimales)
@@ -24,12 +26,8 @@ const INITIAL_SUPPLY: u64 = 1_000_000_000_000_000; // 1 BILLÓN de OXD (6 decima
 // Previene wash-trading para liberar tokens masivamente en un solo día
 // 1% del supply total por día = 10,000,000,000 tokens (10M OXD)
 const MAX_DAILY_RELEASE: u64 = INITIAL_SUPPLY / 100; // 1% del supply total (10M OXD)
+const SECONDS_PER_YEAR: i64 = 365 * 24 * 60 * 60;
 const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
-
-// Transfer Fee: 20% anual = ~0.054% por día (redondeado a 5 basis points para simplificar)
-// Esto es aproximado, pero Token-2022 no soporta cálculos dinámicos de fee
-// ⚠️ LIMITACIÓN: TransferFee es estático, no proporcional al tiempo
-const TRANSFER_FEE_BASIS_POINTS: u16 = 5; // 0.05% por transfer (aproximación conservadora)
 
 #[program]
 pub mod oxide {
@@ -103,31 +101,52 @@ pub mod oxide {
     }
 
     /// NUEVO: transfer_to_uninitialized
-    /// Permite enviar tokens a wallets no-registradas, creando su UserAccount dinámicamente
-    /// Soluciona fricción de UX: no requiere que destinatario inicie sesión primero
+    /// Permite enviar tokens a wallets no registradas (crea UserAccount si falta)
+    /// y evita pisar balances existentes de receptores ya inicializados.
     pub fn transfer_to_uninitialized(ctx: Context<TransferToUninitialized>, amount: u64) -> Result<()> {
+        let global = &mut ctx.accounts.global_state;
         let from = &mut ctx.accounts.from_user;
         let to = &mut ctx.accounts.to_user;
+        let to_owner = ctx.accounts.to_owner.key();
         let now = Clock::get()?.unix_timestamp;
 
-        // Aplicar burn al remitente
-        apply_lazy_burn(from, now)?;
+        // Validar que mint_authority está verificada
+        require!(global.mint_verified, ErrorCode::MintNotVerified);
 
-        // Inicializar cuenta del destinatario si no existe
-        to.owner = ctx.accounts.to_owner.key();
-        to.balance_free = 0;
-        to.balance_staked = 0;
-        to.last_update = now as u64;
-        to.burn_fraction_remainder = 0;
+        // Guardar si el destinatario ya estaba inicializado (antes de mutar last_update)
+        let to_was_initialized = to.last_update != 0;
+
+        // Aplicar burn y actualizar reloj en ambas cuentas
+        apply_lazy_burn(from, now)?;
+        apply_lazy_burn(to, now)?;
+
+        // Si la cuenta ya existe, validar owner para no clobber de otra wallet
+        if to_was_initialized {
+            require!(to.owner == to_owner, ErrorCode::OwnerMismatch);
+        } else {
+            // Inicialización segura (solo si estaba vacía)
+            to.owner = to_owner;
+            to.balance_free = 0;
+            to.balance_staked = 0;
+            to.last_update = now as u64;
+            to.burn_fraction_remainder = 0;
+        }
 
         // Enviar lo máximo posible (burn ya aplicado a 'from')
         let available = from.balance_free;
         let to_send = amount.min(available);
-        
         require!(to_send > 0, ErrorCode::InsufficientFunds);
 
         from.balance_free -= to_send;
-        to.balance_free += to_send;
+        to.balance_free = to.balance_free.saturating_add(to_send);
+        
+        // VESTING DINÁMICO: Liberar tokens del creador proporcional al volumen
+        release_creator_tokens(
+            global,
+            &mut ctx.accounts.creator_account,
+            to_send,
+            now
+        )?;
 
         Ok(())
     }
@@ -135,8 +154,12 @@ pub mod oxide {
     /// DEPOSITAR: Quemar SPL tokens → obtener balance interno
     /// (Usuario devuelve "recibos" al sistema)
     pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
+        let global = &ctx.accounts.global_state;
         let user = &mut ctx.accounts.user_account;
         let now = Clock::get()?.unix_timestamp;
+
+        // Validar que mint_authority está verificada
+        require!(global.mint_verified, ErrorCode::MintNotVerified);
 
         // Aplica lazy burn antes
         apply_lazy_burn(user, now)?;
@@ -267,9 +290,13 @@ pub mod oxide {
     }
 
     pub fn transfer(ctx: Context<TransferTokens>, amount: u64) -> Result<()> {
+        let global = &ctx.accounts.global_state;
         let from = &mut ctx.accounts.from_user;
         let to = &mut ctx.accounts.to_user;
         let now = Clock::get()?.unix_timestamp;
+
+        // Validar que mint_authority está verificada
+        require!(global.mint_verified, ErrorCode::MintNotVerified);
 
         apply_lazy_burn(from, now)?;
         apply_lazy_burn(to, now)?;
@@ -307,24 +334,44 @@ pub mod oxide {
 
     /// GENESIS AIRDROP: Distribuir tokens iniciales a primeros 1000 usuarios
     /// Solo puede llamarse por authority, máximo 1000 veces
-    /// Esto permite "sembrar" la economía sin esperar volumen de trading
+    /// 
+    /// ⚠️ EXCEPCIÓN A LAS REGLAS DE VESTING:
+    /// Este método es el ÚNICO que permite al creador liberar tokens manualmente,
+    /// pero con límites estrictos de seguridad:
+    ///   - Máximo 100 OXD por airdrop (100,000,000 unidades con 6 decimales)
+    ///   - Máximo 1000 airdrops totales (lifetime limit)
+    ///   - **NO respeta cap diario** (diseñado para siembra inicial rápida a early adopters)
+    ///   - Solo puede enviar desde balance_staked (no puede crear tokens)
+    /// 
+    /// Máximo teórico: 100,000 OXD en total (100 OXD × 1000 airdrops)
+    /// Esto representa solo 0.01% del supply inicial (1B tokens)
+    /// 
+    /// DISEÑO: Permite distribuir a early adopters sin esperar volumen de trading,
+    /// pero está limitado en cantidad total para prevenir rug-pull.
     pub fn genesis_airdrop(ctx: Context<GenesisAirdrop>, amount: u64) -> Result<()> {
         let global = &mut ctx.accounts.global_state;
         let creator = &mut ctx.accounts.creator_account;
         let recipient = &mut ctx.accounts.recipient_account;
         let now = Clock::get()?.unix_timestamp;
         
-        // Verificar que no se han dado más de 1000 airdrops
+        // LÍMITE 1: Máximo 1000 airdrops lifetime
         require!(
             global.genesis_airdrops_given < 1000,
             ErrorCode::GenesisAirdropLimitReached
         );
         
-        // Aplicar burn al creador (si tiene balance_free, aunque debería estar todo stakado)
+        // LÍMITE 2: Máximo 100 OXD por airdrop (100,000,000 unidades)
+        const MAX_AIRDROP_AMOUNT: u64 = 100_000_000; // 100 OXD
+        require!(
+            amount <= MAX_AIRDROP_AMOUNT,
+            ErrorCode::AirdropAmountExceedsLimit
+        );
+        
+        // Aplicar burn al creador y recipiente
         apply_lazy_burn(creator, now)?;
         apply_lazy_burn(recipient, now)?;
         
-        // Verificar que el creador tiene suficiente balance stakado
+        // LÍMITE 3: Verificar que el creador tiene suficiente balance stakado
         require!(
             creator.balance_staked >= amount,
             ErrorCode::InsufficientFunds
@@ -335,15 +382,18 @@ pub mod oxide {
         creator.balance_staked -= amount;
         recipient.balance_free += amount;
         
-        // Incrementar contador
+        // Actualizar contadores globales
+        // NOTA: NO actualiza daily_released_amount (excepción al cap diario)
+        global.total_tokens_released += amount;
         global.genesis_airdrops_given += 1;
         
         msg!(
-            "Genesis airdrop #{}: {} tokens to {}. Remaining airdrops: {}",
+            "Genesis airdrop #{}: {} OXD to {}. Remaining airdrops: {}. Total released: {} OXD",
             global.genesis_airdrops_given,
-            amount,
+            amount / 1_000_000, // Mostrar en OXD
             recipient.owner,
-            1000 - global.genesis_airdrops_given
+            1000 - global.genesis_airdrops_given,
+            global.total_tokens_released / 1_000_000
         );
         
         Ok(())
@@ -353,11 +403,37 @@ pub mod oxide {
     /// Limpia la deuda de oxidación del balance SPL ANTES de venderlo
     /// Debe llamarse si elapsed > 15 minutos antes de transferir SPL
     pub fn clear_debt(ctx: Context<ClearDebt>) -> Result<()> {
+        let global = &ctx.accounts.global_state;
         let user = &mut ctx.accounts.user_account;
         let now = Clock::get()?.unix_timestamp;
 
-        // Calcular deuda acumulada desde last_update
-        let elapsed = now - user.last_update as i64;
+        // Validar que mint_authority está verificada
+        require!(global.mint_verified, ErrorCode::MintNotVerified);
+
+        // Validar que el tracking provisto corresponde al PDA correcto del hook
+        let (expected_tracking, _) = Pubkey::find_program_address(
+            &[b"tracking", ctx.accounts.owner.key().as_ref()],
+            ctx.accounts.hook_program.key
+        );
+        require_keys_eq!(
+            ctx.accounts.tracking_account.key(),
+            expected_tracking,
+            ErrorCode::InvalidTrackingAccount
+        );
+
+        // Si la cuenta existe y no la posee el hook, es inválida
+        if !ctx.accounts.tracking_account.data_is_empty() {
+            require!(
+                ctx.accounts.tracking_account.owner == ctx.accounts.hook_program.key(),
+                ErrorCode::InvalidTrackingAccount
+            );
+        }
+
+        // Fuente de verdad: timestamp del TrackingAccount (hook). Si no existe, usar user.last_update.
+        let tracking_last_update = read_tracking_last_update(&ctx.accounts.tracking_account)
+            .unwrap_or(user.last_update);
+
+        let elapsed = now - tracking_last_update as i64;
         
         if elapsed > 0 {
             // Obtener balance SPL actual del usuario
@@ -391,10 +467,10 @@ pub mod oxide {
             }
         }
 
-        // RESETEAR last_update al tiempo actual (desbloquea por 15 min)
-        user.last_update = now as u64;
+        // Aplicar lazy burn al balance interno para mantener consistencia con el reloj global
+        apply_lazy_burn(user, now)?;
         
-        // SINCRONIZAR TrackingAccount del hook via CPI
+        // SINCRONIZAR TrackingAccount del hook via CPI con el timestamp nuevo
         sync_tracking_account(
             &ctx.accounts.hook_program,
             &ctx.accounts.owner,
@@ -447,6 +523,32 @@ fn sync_tracking_account<'info>(
     )?;
     
     Ok(())
+}
+
+/// Estructura mínima para leer TrackingAccount del hook (owner, last_update, remainder)
+#[derive(AnchorDeserialize)]
+struct TrackingAccountData {
+    pub owner: Pubkey,
+    pub last_update: u64,
+    pub burn_fraction_remainder: u128,
+}
+
+/// Lee last_update del TrackingAccount; retorna None si la cuenta está vacía o no tiene tamaño suficiente
+fn read_tracking_last_update(tracking_account: &UncheckedAccount) -> Option<u64> {
+    let data_ref = tracking_account.try_borrow_data().ok()?;
+    let data: &[u8] = &data_ref;
+    // Debe tener al menos discriminator (8) + campos
+    if data.len() < 8 + 32 + 8 + 16 {
+        return None;
+    }
+    // Saltar discriminator Anchor (8 bytes)
+    let mut slice: &[u8] = &data[8..];
+    if let Ok(tracking) = TrackingAccountData::deserialize(&mut slice) {
+        if tracking.last_update > 0 {
+            return Some(tracking.last_update);
+        }
+    }
+    None
 }
 
 fn apply_lazy_burn(user: &mut UserAccount, now: i64) -> Result<()> {
@@ -589,7 +691,17 @@ pub struct InitializeGlobal<'info> {
     #[account(
         init,
         payer = authority,
-        space = 8 + 32 + 32 + 1 + 1 + 8 + 2 + 2 + 1,  // discriminator + authority + mint + mint_verified + amm_whitelist_enabled + total_tokens_released + release_rate_basis_points + genesis_airdrops_given + bump
+        space = 8
+            + 32  // authority
+            + 32  // mint
+            + 1   // mint_verified
+            + 1   // amm_whitelist_enabled
+            + 8   // total_tokens_released
+            + 2   // release_rate_basis_points
+            + 2   // genesis_airdrops_given
+            + 8   // last_release_day
+            + 8   // daily_released_amount
+            + 1,  // bump
         seeds = [b"global"],
         bump
     )]
@@ -685,7 +797,9 @@ pub struct Deposit<'info> {
     pub tracking_account: UncheckedAccount<'info>,
     
     /// Programa del transfer hook
-    /// CHECK: Program ID del hook
+    #[account(
+        constraint = hook_program.key() == &HOOK_PROGRAM_ID @ ErrorCode::InvalidHookProgram
+    )]
     pub hook_program: UncheckedAccount<'info>,
     
     pub owner: Signer<'info>,
@@ -733,7 +847,9 @@ pub struct Withdraw<'info> {
     pub tracking_account: UncheckedAccount<'info>,
     
     /// Programa del transfer hook
-    /// CHECK: Program ID del hook
+    #[account(
+        constraint = hook_program.key() == &HOOK_PROGRAM_ID @ ErrorCode::InvalidHookProgram
+    )]
     pub hook_program: UncheckedAccount<'info>,
     
     #[account(mut)]
@@ -833,6 +949,21 @@ pub struct TransferToUninitialized<'info> {
     /// CHECK: No necesita ser signer, solo para derivar la PDA
     pub to_owner: AccountInfo<'info>,
     
+    #[account(
+        mut,
+        seeds = [b"global"],
+        bump = global_state.bump,
+    )]
+    pub global_state: Account<'info, GlobalState>,
+    
+    /// Cuenta del creador para vesting dinámico
+    #[account(
+        mut,
+        seeds = [b"user", global_state.authority.as_ref()],
+        bump,
+    )]
+    pub creator_account: Account<'info, UserAccount>,
+    
     pub owner: Signer<'info>,
     pub system_program: Program<'info, System>,
 }
@@ -913,7 +1044,9 @@ pub struct ClearDebt<'info> {
     pub tracking_account: UncheckedAccount<'info>,
     
     /// Programa del transfer hook
-    /// CHECK: Program ID del hook
+    #[account(
+        constraint = hook_program.key() == &HOOK_PROGRAM_ID @ ErrorCode::InvalidHookProgram
+    )]
     pub hook_program: UncheckedAccount<'info>,
     
     #[account(mut)]
@@ -939,4 +1072,14 @@ pub enum ErrorCode {
     CreatorCannotUnstake,
     #[msg("Límite de airdrops de génesis alcanzado (máximo 1000)")]
     GenesisAirdropLimitReached,
+    #[msg("Owner del destino no coincide con la cuenta existente")]
+    OwnerMismatch,
+    #[msg("TrackingAccount inválida para el owner proporcionado")]
+    InvalidTrackingAccount,
+    #[msg("Cantidad de airdrop excede límite (máximo 100 OXD por airdrop)")]
+    AirdropAmountExceedsLimit,
+    #[msg("Cap diario de liberación alcanzado (máximo 1% del supply por día)")]
+    DailyCapExceeded,
+    #[msg("Hook program ID inválido - no coincide con el esperado")]
+    InvalidHookProgram,
 }

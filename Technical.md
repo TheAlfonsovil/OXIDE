@@ -7,6 +7,7 @@
 - **Transfer Hook (Token-2022)** mantiene tracking por wallet (PDA `TrackingAccount`) y evita evasión de burn; los compradores desde pools entran "limpios" (timestamp reseteado a `now`).
 - **Whitelist inmutable** para pools (Raydium V4, Orca Whirlpool, Meteora DLMM): zonas de liquidez sin acumulación de deuda.
 - **Vesting dinámico anti-rugpull**: el creador solo libera 0.1% del volumen operado (`release_rate_basis_points=10`) y tiene bloqueado el `unstake`; no puede liberar manualmente.
+- **Genesis Airdrops (EXCEPCIÓN CONTROLADA)**: Único método donde el creador puede liberar tokens manualmente, con límites estrictos: máx. 100 OXD por airdrop, máx. 1000 airdrops lifetime. **NO respeta cap diario** (diseñado para siembra inicial rápida a early adopters). Total máximo: 100,000 OXD (0.01% del supply).
 - **Costo de activación por wallet**: ~0.002 SOL una sola vez (creación de `TrackingAccount`), pagado por el emisor.
 
 ## Qué es y qué no es
@@ -76,6 +77,108 @@ Saldo libre tras burn: ~950.7 OXD. Si el usuario stakea antes, el burn se detien
 - Cada wallet requiere un `TrackingAccount` (80 bytes, rent-exempt ~0.00204 SOL). Se crea automáticamente la primera vez que recibe OXD; paga el emisor.
 - Razón de diseño: evita que alguien reciba tokens y evada burn; asegura consistencia de timestamps y promedios.
 - Fallo esperado si no hay SOL: la TX revierte. Solución: prefundear o advertir al usuario.
+
+## AMM Whitelist & Delegate Transfers
+
+### Pool Whitelist Mechanism
+
+El transfer hook whitelista **pools de liquidez** de DEXs principales para prevenir que la validación de 15 minutos bloquee trading normal:
+
+- **Raydium V4**: `675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8`
+- **Orca Whirlpool**: `whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc`
+- **Meteora DLMM**: `LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo`
+
+### Cómo Funciona la Detección de Whitelist
+
+El hook valida el **program owner** de la cuenta source token:
+
+```rust
+// Para transfers directos (pool authority es signer):
+if ctx.accounts.owner.key() == source_token.owner {
+    let owner_program_id = ctx.accounts.owner.owner;  // Programa que posee la pool PDA
+    sender_is_pool = is_whitelisted(&owner_program_id);
+}
+```
+
+**Pools whitelisted evitan el requisito de `clear_debt()` de 15 minutos.**
+
+---
+
+### ⚠️ LIMITACIÓN: Delegate Transfers desde Pools
+
+**La whitelist solo funciona para TRANSFERS DIRECTOS** donde la pool authority es el signer.
+
+**Delegate transfers NO están whitelisted**, incluso si el source token owner es una pool:
+
+```rust
+// Delegate transfer (router/aggregator usa delegación):
+if ctx.accounts.owner.key() != source_token.owner {
+    sender_is_pool = false;  // ❌ Tratado como usuario regular
+    // Debe satisfacer regla de 15 minutos o llamar clear_debt()
+}
+```
+
+#### ¿Por Qué Este Diseño?
+
+1. **Seguridad**: Los delegates podrían ser cualquier programa arbitrario. Whitelistarlos crearía exploits de bypass.
+2. **Pragmatismo**: Los DEXs mainstream (Raydium/Orca/Meteora) usan **transfers directos** para swaps normales.
+3. **Inmutabilidad**: La whitelist está hardcoded. No podemos validar relaciones de delegates dinámicas sin upgradability.
+
+#### Impacto en Integraciones
+
+**✅ Funciona out-of-the-box:**
+- Swaps estándar de Raydium
+- Swaps estándar de Orca
+- Swaps estándar de Meteora
+- Rutas single-hop de Jupiter (cuando usa llamadas directas a pools)
+
+**⚠️ Requiere adaptación:**
+- Rutas multi-hop de Jupiter aggregator usando delegates
+- Bots de arbitraje custom con authorities delegadas
+- Protocolos de limit orders que delegan acceso a pools
+
+**Solución para edge cases:**
+Los integradores deben llamar `clear_debt()` antes de delegate transfers desde pools:
+
+```typescript
+// Ejemplo: Jupiter multi-hop con OXIDE
+await program.methods.clearDebt().accounts({
+  user: poolAuthority,
+  userAccount: poolUserPDA,
+  trackingAccount: poolTrackingPDA,
+  // ...
+}).rpc();
+
+// Ahora el delegate transfer tendrá éxito
+await jupiterSwap({
+  inputMint: OXIDE_MINT,
+  // ...
+});
+```
+
+#### Trade-off Aceptado
+
+Priorizamos **inmutabilidad radical** sobre conveniencia de edge cases:
+- Ninguna governance puede modificar la whitelist
+- Sin backdoors vía "actualizaciones de seguridad"
+- Sin centralización progresiva (común en DAOs)
+- Código es ley: si necesitas delegates, adapta tu integración
+
+**Si esta limitación rompe tu caso de uso, OXIDE puede no ser el protocolo adecuado.**
+
+---
+
+### Monitoreo Post-Deploy
+
+Después del lanzamiento en mainnet, monitorizaremos:
+1. % de transfers fallidos desde pools legítimos
+2. Quejas de usuarios sobre swaps bloqueados en DEXs principales
+
+**Si >5% del volumen de pools es afectado**, consideraremos:
+- Upgrade para soportar detección de delegates (requiere añadir `source_owner_account` a ExtraAccountMetas)
+- O mantener status quo si el volumen afectado es negligible
+
+**Timeline de decisión:** 30 días de observación post-mainnet.
 
 ## Inmutabilidad y gobierno
 - **Sin upgrade path**: cualquier cambio requiere nuevo programa y migración voluntaria. No hay multi-sig que pueda alterar reglas monetarias o la whitelist.
@@ -731,44 +834,68 @@ solana account <GlobalState_PDA>
 - 0 SPL en circulación inicial (todo interno)
 - Verificación mint authority
 - **Genesis Airdrops (Manual)**: El creador distribuye a primeros 1000 usuarios
-  - Proceso: Creador llama a `genesis_airdrop(<wallet>, 10_000_000)` por cada usuario
-  - Monto:  OXIDE por usuario (ajustable según estrategia)
-  - Total distribuido: ~ OXIDE (1% del stakado)
+  - **EXCEPCIÓN A LAS REGLAS**: Único método donde el creador puede liberar manualmente
+  - **Límites de seguridad**:
+    - Máximo 100 OXD por airdrop (100,000,000 unidades con 6 decimales)
+    - Máximo 1000 airdrops lifetime (contador on-chain `genesis_airdrops_given`)
+    - **NO respeta cap diario** (diseñado para siembra inicial rápida a early adopters)
+    - Solo puede enviar desde `balance_staked` (no puede crear tokens)
+  - **Total máximo posible**: 100,000 OXD (100 × 1000) = 0.01% del supply inicial
+  - **Propósito**: Distribuir a early adopters en la fase genesis sin restricciones diarias
+  - **Rationale**: El cap diario (1% del supply) está diseñado para vesting orgánico basado en volumen.
+    Los airdrops genesis son una siembra única e inicial, limitados por cantidad total (100K OXD),
+    no por tiempo. Esto permite onboarding rápido de comunidad sin esperar meses.
+  - Proceso: Creador llama a `genesis_airdrop(<wallet>, amount)` por cada usuario
   - Objetivo: Crear base inicial de holders sin esperar volumen de mercado
 
 **Ejecución** (vía programa Anchor):
 ```rust
-// lib.rs línea 302 - Implementación real
+// lib.rs - Implementación real con límites de seguridad
 pub fn genesis_airdrop(ctx: Context<GenesisAirdrop>, amount: u64) -> Result<()> {
     let global = &mut ctx.accounts.global_state;
     let creator = &mut ctx.accounts.creator_account;
     let recipient = &mut ctx.accounts.recipient_account;
+    let now = Clock::get()?.unix_timestamp;
     
-    // Hard constraints (imposible evadir)
+    // LÍMITE 1: Máximo 1000 airdrops lifetime (hard constraint imposible evadir)
     require!(
         global.genesis_airdrops_given < 1000,
         ErrorCode::GenesisAirdropLimitReached
     );
+    
+    // LÍMITE 2: Máximo 100 OXD por airdrop (100,000,000 unidades)
+    const MAX_AIRDROP_AMOUNT: u64 = 100_000_000; // 100 OXD
+    require!(
+        amount <= MAX_AIRDROP_AMOUNT,
+        ErrorCode::AirdropAmountExceedsLimit
+    );
+    
+    // LÍMITE 3: Verificar que el creador tiene suficiente balance stakado
     require!(
         creator.balance_staked >= amount,
         ErrorCode::InsufficientFunds
     );
-    require!(
-        recipient.balance_free == 0 && recipient.balance_staked == 0,
-        ErrorCode::RecipientAlreadyHasBalance
-    );
     
-    // Transferencia: creator.balance_staked ? recipient.balance_free
+    // Transferencia: creator.balance_staked → recipient.balance_free
     // NOTA: Esto es una EXCEPCIÓN - única vía donde el creador reduce su stakado
-    creator.balance_staked -= amount;  // Paga desde stakado
-    recipient.balance_free += amount;  // Recipiente recibe free
+    creator.balance_staked -= amount;
+    recipient.balance_free += amount;
     
+    // Actualizar contadores globales
+    // NOTA: NO actualiza daily_released_amount (excepción al cap diario)
+    global.total_tokens_released += amount;
     global.genesis_airdrops_given += 1;  // Irreversible
+    
     Ok(())
 }
 ```
 
-**Auditoría on-chain**: `GlobalState.genesis_airdrops_given` es campo público. Si >= 1000 ? El programa rechaza nuevas llamadas.
+**Auditoría on-chain**: 
+- `GlobalState.genesis_airdrops_given` es campo público. Si >= 1000 → El programa rechaza nuevas llamadas.
+- **Cap diario NO aplica** a genesis_airdrops (campo `daily_released_amount` no se actualiza).
+- Cap diario SÍ aplica a vesting dinámico (`release_creator_tokens`) para prevenir wash-trading.
+- Máximo teórico absoluto: 100 OXD × 1000 airdrops = 100,000 OXD (0.01% del supply inicial).
+- Diseño: Permite siembra inicial rápida sin esperar días/semanas de trading orgánico.
 
 ### Fase 2: Crecimiento (Q2-Q4 2026)
 - **Vesting Dinámico Activo**: Creador solo puede vender si hay trading

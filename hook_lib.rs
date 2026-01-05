@@ -41,13 +41,13 @@ pub mod amm_whitelist {
     use solana_program::pubkey::Pubkey;
     use solana_program::pubkey;
     
-    // Raydium V4 Pool Program (owner de las pool accounts)
+    // Raydium V4 Pool Program (owner de las pool authority PDAs)
     pub const RAYDIUM_V4: Pubkey = pubkey!("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8");
     
-    // Orca Whirlpool Program (owner de las pool accounts)
+    // Orca Whirlpool Program (owner de las pool authority PDAs)
     pub const ORCA_WHIRLPOOL: Pubkey = pubkey!("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc");
     
-    // Meteora DLMM (owner de las pool accounts)
+    // Meteora DLMM (owner de las pool authority PDAs)
     pub const METEORA_DLMM: Pubkey = pubkey!("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
     
     // Añadir más según se listen en otros DEXs
@@ -63,6 +63,8 @@ pub mod oxide_transfer_hook {
         ctx: Context<InitializeExtraAccountMetaList>,
         oxide_program_id: Pubkey,
     ) -> Result<()> {
+        // oxide_program_id se mantiene para compatibilidad de IDL (no usado aquí)
+        let _ = oxide_program_id;
         // Configurar las PDAs adicionales que se pasan al hook
         let account_metas = vec![
             // GlobalState PDA del programa OXIDE (para leer whitelist_enabled)
@@ -113,10 +115,37 @@ pub mod oxide_transfer_hook {
             )?,
         ];
 
-        // Inicializar la lista de cuentas extra
+        // Crear la cuenta TLV si está vacía (PDA: ["extra-account-metas", mint])
         let account_size = ExtraAccountMetaList::size_of(account_metas.len())? as u64;
-        let lamports = Rent::get()?.minimum_balance(account_size as usize);
-        
+        let min_rent = Rent::get()?.minimum_balance(account_size as usize);
+
+        if ctx.accounts.extra_account_meta_list.data_is_empty() {
+            anchor_lang::solana_program::program::invoke_signed(
+                &anchor_lang::solana_program::system_instruction::create_account(
+                    ctx.accounts.payer.key,
+                    ctx.accounts.extra_account_meta_list.key,
+                    min_rent,
+                    account_size,
+                    ctx.program_id,
+                ),
+                &[ctx.accounts.payer.to_account_info(), ctx.accounts.extra_account_meta_list.to_account_info(), ctx.accounts.system_program.to_account_info()],
+                &[&[
+                    b"extra-account-metas",
+                    ctx.accounts.mint.key().as_ref(),
+                    &[ctx.bumps.extra_account_meta_list],
+                ]],
+            )?;
+        }
+
+        require!(
+            ctx.accounts.extra_account_meta_list.owner == ctx.program_id,
+            ErrorCode::InvalidExtraMetaOwner
+        );
+        require!(
+            ctx.accounts.extra_account_meta_list.data_len() as u64 >= account_size,
+            ErrorCode::InvalidExtraMetaSize
+        );
+
         ExtraAccountMetaList::init::<ExecuteInstruction>(
             &mut ctx.accounts.extra_account_meta_list.try_borrow_mut_data()?,
             &account_metas,
@@ -166,10 +195,28 @@ pub mod oxide_transfer_hook {
         )?;
         let whitelist_enabled = global_data.amm_whitelist_enabled;
         
-        // Verificar si sender es pool Y whitelist está habilitada
-        let sender_is_pool = whitelist_enabled && is_whitelisted_pool(&ctx.accounts.source_token.owner);
+        // Determinar si el owner real de la token account (no el delegate) es un pool whitelisted
+        // IMPORTANTE: Esto debe hacerse ANTES de validar owner para no bloquear transfers válidos desde pools
+        let source_owner = ctx.accounts.source_token.owner;
+        let mut sender_is_pool = false;
+
+        // Si la cuenta 'owner' provista coincide con la authority real, podemos leer su owner program
+        if ctx.accounts.owner.key() == source_owner {
+            let owner_program = ctx.accounts.owner.owner;
+            sender_is_pool = whitelist_enabled && is_whitelisted_owner_program(owner_program);
+        } else {
+            // Transferencia vía delegate: tratar como usuario normal (no pool)
+            sender_is_pool = false;
+        }
         
+        // Validaciones SOLO para usuarios normales (no pools)
         if !sender_is_pool {
+            // Validar que sender_tracking pertenece al owner de source_token
+            require!(
+                sender_tracking.owner == ctx.accounts.source_token.owner,
+                ErrorCode::TrackingOwnerMismatch
+            );
+            
             // Sender es usuario normal - DEBE tener tracking inicializada
             if sender_tracking.last_update == 0 {
                 msg!("❌ ERROR: TrackingAccount no inicializada. Acción requerida:");
@@ -218,6 +265,12 @@ pub mod oxide_transfer_hook {
             if receiver_tracking.last_update == 0 {
                 receiver_tracking.owner = ctx.accounts.destination_token.owner;
                 receiver_tracking.burn_fraction_remainder = 0;
+            } else {
+                // Validar que receiver_tracking pertenece al owner de destination_token
+                require!(
+                    receiver_tracking.owner == ctx.accounts.destination_token.owner,
+                    ErrorCode::TrackingOwnerMismatch
+                );
             }
             receiver_tracking.last_update = now as u64;
             msg!("Buyer from POOL enters clean: timestamp reset to now");
@@ -229,6 +282,11 @@ pub mod oxide_transfer_hook {
                 receiver_tracking.last_update = sender_tracking.last_update;
                 msg!("Receiver initialized with sender's timestamp: {}", sender_tracking.last_update);
             } else {
+                // Validar que receiver_tracking pertenece al owner de destination_token
+                require!(
+                    receiver_tracking.owner == ctx.accounts.destination_token.owner,
+                    ErrorCode::TrackingOwnerMismatch
+                );
                 // Receiver YA tiene tokens - calcular weighted average de timestamps
                 // Esto refleja que recibe una MEZCLA de tokens nuevos (del sender) con viejos (suyos)
                 let receiver_balance = ctx.accounts.destination_token.amount;
@@ -271,26 +329,14 @@ pub mod oxide_transfer_hook {
     }
 }
 
-/// Verifica si una cuenta es owned por un programa de pool conocido (Zona Franca)
-/// Pools whitelisted NO acumulan deuda - tokens "en tránsito" en liquidez
-fn is_whitelisted_pool(token_account_owner: &Pubkey) -> bool {
-    // Verificar contra program IDs conocidos que poseen pool accounts
-    // NOTA: Esto verifica el OWNER de la TokenAccount, no el programa que ejecuta
-    
-    // Para pools de Raydium/Orca/Meteora, el owner será el pool account (PDA del programa)
-    // NO podemos verificar directamente contra program IDs aquí
-    // SOLUCIÓN: Verificar si la cuenta es una PDA derivada de programas conocidos
-    // Por simplicidad, verificamos contra lista hardcoded de pool addresses conocidos
-    
-    // En producción real, deberías:
-    // 1. Mantener lista on-chain de pools verificados (actualizable por authority)
-    // 2. O verificar que el owner es PDA del programa AMM conocido
-    
-    // Por ahora, verificamos contra program IDs directamente
-    // (asumiendo que pools pueden ser owned directamente por el programa)
-    token_account_owner == &amm_whitelist::RAYDIUM_V4
-        || token_account_owner == &amm_whitelist::ORCA_WHIRLPOOL
-        || token_account_owner == &amm_whitelist::METEORA_DLMM
+/// Verifica si el **owner del owner** (el programa que posee la cuenta authority)
+/// está en la whitelist. Para pools, la authority suele ser una PDA cuya cuenta
+/// es propiedad del programa AMM (Raydium/Orca/Meteora). Este chequeo funciona
+/// porque `owner.owner` = program_id que controla la PDA.
+fn is_whitelisted_owner_program(owner_program_id: &Pubkey) -> bool {
+    owner_program_id == &amm_whitelist::RAYDIUM_V4
+        || owner_program_id == &amm_whitelist::ORCA_WHIRLPOOL
+        || owner_program_id == &amm_whitelist::METEORA_DLMM
 }
 
 // ============== STRUCTS ==============
@@ -327,16 +373,14 @@ pub struct InitializeExtraAccountMetaList<'info> {
 
     /// La lista de cuentas extra que el hook necesita
     /// CHECK: Validado por ExtraAccountMetaList
-    #[account(mut)]
-    pub extra_account_meta_list: UncheckedAccount<'info>,
-
-    pub mint: InterfaceAccount<'info, Mint>,
-    
     #[account(
+        mut,
         seeds = [b"extra-account-metas", mint.key().as_ref()],
         bump
     )]
-    pub extra_account_meta_list_pda: SystemAccount<'info>,
+    pub extra_account_meta_list: UncheckedAccount<'info>,
+
+    pub mint: InterfaceAccount<'info, Mint>,
 
     pub system_program: Program<'info, System>,
 }
@@ -438,4 +482,12 @@ pub enum ErrorCode {
     DebtNotCleared,
     #[msg("⚠️ TrackingAccount no inicializada. Llama clear_debt() o withdraw() primero para activar tu wallet")]
     TrackingNotInitialized,
+    #[msg("Owner de la token account no coincide con la cuenta 'owner' provista")]
+    OwnerKeyMismatch,
+    #[msg("La cuenta ExtraAccountMetaList no pertenece al programa del hook")]
+    InvalidExtraMetaOwner,
+    #[msg("La cuenta ExtraAccountMetaList es demasiado pequeña para las metas requeridas")]
+    InvalidExtraMetaSize,
+    #[msg("TrackingAccount owner no coincide con el owner de la token account")]
+    TrackingOwnerMismatch,
 }

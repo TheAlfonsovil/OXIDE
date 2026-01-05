@@ -1,0 +1,49 @@
+OXIDE CLI - ejemplos rápidos (mainnet-beta)
+===========================================
+
+Prerrequisitos
+- Instala deps: pip install anchorpy==0.20.2 solana==0.30.2 solders==0.18.1
+- Usa el script: cli/oxide_cli.py
+- Variables que puedes exportar (o pasar como flags):
+  OXIDE_PROGRAM_ID, HOOK_PROGRAM_ID, OXIDE_MINT, RPC_URL, KEYPAIR, OXIDE_IDL
+- Todas las cantidades en OXD con 6 decimales.
+
+Alias sugerido
+- export OXIDE_PROGRAM_ID=<prog>
+- export HOOK_PROGRAM_ID=<hook>
+- export OXIDE_MINT=<mint>
+- export RPC_URL=https://api.mainnet-beta.solana.com
+- export KEYPAIR=~/.config/solana/id.json
+
+1) Crear UserAccount (si no existe)
+python cli/oxide_cli.py init-user
+
+2) Ver balances interno (free/staked)
+python cli/oxide_cli.py balance
+
+3) Stakear (mover de libre a stake)
+python cli/oxide_cli.py stake --amount 123.456789
+
+4) Des-stakear (mover de stake a libre)
+python cli/oxide_cli.py unstake --amount 50
+
+5) Transferencia interna a otra wallet (requiere que el receptor ya tenga UserAccount)
+python cli/oxide_cli.py transfer --to <DEST_WALLET> --amount 10.5
+
+6) Transferir a una wallet nueva (crea el UserAccount destino on-the-fly)
+python cli/oxide_cli.py transfer-uninitialized --to <DEST_WALLET> --amount 10.5
+
+7) Limpiar deuda sobre SPL (antes de vender si >15m)
+python cli/oxide_cli.py clear-debt --token-account <TOKEN_ACCOUNT_2022>
+
+8) Depositar SPL → balance interno (quema SPL, acredita interno)
+python cli/oxide_cli.py deposit --amount 200 --token-account <TOKEN_ACCOUNT_2022>
+
+9) Retirar a SPL (para mandar a exchange/pool) ← balance interno → SPL
+python cli/oxide_cli.py withdraw --amount 75 --token-account <TOKEN_ACCOUNT_2022>
+
+Notas útiles
+- El token account debe ser ATA Token-2022 para el mint de OXIDE. Si no existe, créalo con spl-token (token-2022) o tu wallet.
+- clear_debt resetea la ventana de 15m y quema SPL pendiente.
+- transfer-uninitialized cobra ~0.002 SOL al emisor para crear la TrackingAccount del receptor.
+- Si usas un exchange/pool, primero withdraw (mintea SPL), luego haz el swap en el DEX whitelisted o donde corresponda.
