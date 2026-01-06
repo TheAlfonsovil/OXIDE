@@ -11,6 +11,9 @@ build/
 /pnpm-lock.yaml
 package-lock.json
 
+# Lock files (si usas pnpm)
+yarn.lock
+
 # Environment
 .env
 .env.local

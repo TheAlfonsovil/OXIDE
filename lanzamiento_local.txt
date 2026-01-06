@@ -138,6 +138,8 @@ FASE 4 – TESTS LOCALES (SIN VALIDADOR AÚN)
 ───────────────────────────────────────────────────────────────────────────────
 
 9. Ejecuta tests unitarios (pura lógica Rust, < 1 segundo)
+   $ cargo test --manifest-path programs/oxide/Cargo.toml -- --nocapture
+   $ cargo test --manifest-path programs/oxide_transfer_hook/Cargo.toml -- --nocapture
    $ cargo test --test unit_tests -- --nocapture
    
    Expected: ✅ ALL PASS
