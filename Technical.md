@@ -1,7 +1,7 @@
 ﻿# OXIDE: Time-Decay Monetary Protocol (Solana Token-2022)
 
 ## Resumen ejecutivo
-- Activo algorítmico con deflación **máxima** de 20% anual aplicada solo al **balance libre** (no staked) y proporcional al tiempo transcurrido: $\text{burn}=\text{balance}\_{free}\times0.20\times\tfrac{t}{\text{año}}$.
+- Activo algorítmico con deflación **exponencial** de 20% anual aplicada solo al **balance libre** (no staked): $\text{remaining}=\text{balance}\_{free}\times(0.8)^{\tfrac{t}{\text{año}}}$ (decay continuo compuesto).
 - **0% decay en stake**: mover a `balance_staked` congela la oxidación; retirarlo devuelve exposición al reloj.
 - **Ventana de gracia de 15 minutos** (UX, no parámetro económico): permite transferir/operar sin limpiar deuda; pasado ese tiempo debe llamarse `clear_debt()` o esperar a la siguiente operación que sincronice.
 - **Transfer Hook (Token-2022)** mantiene tracking por wallet (PDA `TrackingAccount`) y evita evasión de burn; los compradores desde pools entran "limpios" (timestamp reseteado a `now`).
@@ -17,7 +17,7 @@
 - **No es** upgradeable: cambios requieren nuevo deploy y migración voluntaria.
 
 ## Especificación rápida
-- **Deflación**: hasta 20% anual, lineal en el tiempo sobre `balance_free`; fracciones se acumulan en `burn_fraction_remainder` (u128) para evitar exploits por partición.
+- **Deflación**: modelo **exponencial** de 20% anual sobre `balance_free`: $\text{remaining}=\text{balance}\times(0.8)^{\text{años}}$ usando factor diario preciso (0.8^(1/365)) + aproximación Taylor para fracciones < 24h.
 - **Stake**: `balance_staked` no sufre burn; puede volver a `balance_free` vía `unstake` (excepto creador, bloqueado por código).
 - **Grace de 15 min**: si `elapsed > 900s` el hook bloquea transferencias hasta que el usuario llame `clear_debt()` (o venda tras limpiar). Traders pueden operar dentro de la ventana para minimizar burn real.
 - **Transfer hook**: valida tracking, hereda timestamps entre usuarios y resetea a `now` cuando el origen es un pool whitelisted.
@@ -36,7 +36,7 @@
 | Dependencia L1 | Riesgo Solana (interrupciones, fees) | Reconocido; no hay mitigación on-chain más allá de la simplicidad del hook y el uso de CU price. |
 
 ## Política monetaria (correcta y verificable)
-- **Función de burn (lazy burn)**: se calcula al interactuar (`deposit`, `withdraw`, `transfer`, `clear_debt`, etc.). No hay cron jobs. Máximo 20% anual sobre el saldo libre; si el usuario movió fondos hace 1 mes, el burn aplicado será aprox. $0.20 \times \tfrac{30}{365} \approx 1.64\%$ sobre ese balance.
+- **Función de burn (lazy burn)**: se calcula al interactuar (`deposit`, `withdraw`, `transfer`, `clear_debt`, etc.). No hay cron jobs. Modelo **exponencial** de 20% anual: si no tocas fondos por 1 mes, el balance resultante será $\text{balance}\times(0.8)^{30/365}\approx0.9831\times\text{balance}$ (pérdida ~1.69%).
 - **Inmunidad por stake**: mover a `balance_staked` detiene el reloj; volver a `balance_free` reactiva el timer desde `now`.
 - **Composición con pools**: los LP tokens de pools whitelisted no acumulan deuda; el comprador desde pool recibe timestamp limpio.
 - **Sin yield prometido**: la apreciación potencial proviene solo de la reducción de unidades, no de pagos o intereses.
@@ -45,7 +45,10 @@
 Balance libre: 1,000 OXD. Tiempo inactivo: 90 días.
 
 $$
-\text{burn}=1000\times0.20\times\tfrac{90}{365}\approx 49.3\ \text{OXD}
+\text{remaining}=1000\times(0.8)^{90/365}\approx 1000\times0.9512\approx 951.2\ \text{OXD}
+$$
+$$
+\text{burn}=1000-951.2\approx 48.8\ \text{OXD}
 $$
 
 Saldo libre tras burn: ~950.7 OXD. Si el usuario stakea antes, el burn se detiene (0%).
@@ -204,8 +207,8 @@ Después del lanzamiento en mainnet, monitorizaremos:
 - Transparencia: mencionar siempre la dependencia de Solana, la ventana de 15 minutos y el costo de activación por wallet.
 
 ## FAQ breve
-- **¿La deflación es siempre 20%?** No. Es el máximo anual sobre `balance_free`, proporcional al tiempo. En stake es 0%.
-- **¿Puedo operar sin pagar burn?** Operar <15m reduce la exposición; fuera de la ventana debes `clear_debt()` o asumir el burn proporcional. Depositar/stakear pausa el reloj.
+- **¿La deflación es siempre 20%?** No. Es **exponencial compuesta**: 20% anual = retención del 80% = $(0.8)^{\text{años}}$. Asintóticamente se acerca al 100% quemado pero nunca lo alcanza. En stake es 0%.
+- **¿Puedo operar sin pagar burn?** Operar <15m reduce la exposición; fuera de la ventana debes `clear_debt()` o asumir el burn exponencial acumulado. Depositar/stakear pausa el reloj.
 - **¿Qué pasa si un DEX nuevo aparece?** La versión actual no lo soporta; requeriría un fork/deploy nuevo. La inmutabilidad es deliberada.
 - **¿Cómo vendo como creador?** Solo lo que libera el mercado (0.1% del volumen, cap diario 1%). El código rechaza `unstake` del creador.
 

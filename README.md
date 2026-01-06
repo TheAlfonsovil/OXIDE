@@ -17,7 +17,7 @@ Whitepaper institucional: preciso, sin hype, orientado a comités de riesgo, aud
 ---
 
 ## Executive Summary (≤1 página)
-- **Tesis**: OXIDE es un activo no rendidor cuyo suministro efectivo se contrae sobre saldos libres (máx. 20% anual) y se preserva en stake (0% burn). Incentiva compromiso activo de capital y penaliza ociosidad sin depender de decisiones humanas.
+- **Tesis**: OXIDE es un activo no rendidor cuyo suministro efectivo se contrae exponencialmente sobre saldos libres (decay compuesto 20% anual) y se preserva en stake (0% burn). Incentiva compromiso activo de capital y penaliza ociosidad sin depender de decisiones humanas.
 - **Posicionamiento**: instrumento monetario programático, sin yield, sin governance, sin upgrade, no estable. Diseñado para holders de largo plazo y operadores que limpien deuda o actúen dentro de 15m.
 - **Mecánica clave**: Token-2022 con Transfer Hook inmutable; tracking por wallet; herencia ponderada de antigüedad; pools whitelisted (Raydium V4, Orca Whirlpool, Meteora DLMM) como zona franca; `clear_debt` requerido si `elapsed>900s`.
 - **Vesting anti-rugpull**: creador libera solo 0.1% del volumen con cap diario 1% del supply; `unstake` del creador prohibido; sin multisig ni governance que altere reglas.
@@ -28,9 +28,9 @@ Whitepaper institucional: preciso, sin hype, orientado a comités de riesgo, aud
 
 ## 1. Tesis monetaria (macro)
 - **Problema que aborda**: liquidez ociosa y ausencia de mecanismos programáticos que penalicen acaparamiento improductivo sin inflación discrecional ni reparto de yield centralizado.
-- **Herramienta**: time-decay máximo del 20% anual sobre saldos libres; favorece uso activo (stake/operativa) o aceptación de erosión de unidades por inactividad. No depende de oráculos ni decisiones humanas.
+- **Herramienta**: decay exponencial (20% anual compuesto) sobre saldos libres; favorece uso activo (stake/operativa) o aceptación de erosión continua por inactividad. No depende de oráculos ni decisiones humanas.
 - **Contexto de sentido**: entornos de liquidez abundante que buscan disciplina de stock; carteras que prefieren activos no rendidores con escasez endógena; escenarios de control de velocidad sin autoridad monetaria.
-- **Por qué decay y no inflación/rebase**: aplica solo a capital ocioso, es proporcional al tiempo, es simétrico (creador incluido) y no requiere política discrecional.
+- **Por qué decay exponencial y no inflación/rebase**: aplica solo a capital ocioso, es continuo y compuesto, es simétrico (creador incluido) y no requiere política discrecional.
 
 ---
 
@@ -50,8 +50,8 @@ Whitepaper institucional: preciso, sin hype, orientado a comités de riesgo, aud
 
 ## 3. Diseño monetario (time-decay correcto)
 - **Ámbito del burn**: solo `balance_free`; excluye `balance_staked` y saldos en pools whitelisted.
-- **Proporcionalidad temporal (lazy burn)**: $\text{burn}=\text{balance}\_{free}\times0.20\times\tfrac{t}{\text{año}}$; p.ej., 30 días inactivo ≈1.64% del saldo libre.
-- **Conservación de fracciones**: `burn_fraction_remainder` (u128) evita exploits por partición.
+- **Decay exponencial (lazy burn)**: $\text{remaining}=\text{balance}\_{free}\times(0.8)^{\text{años}}$; p.ej., 30 días inactivo: $(0.8)^{30/365}\approx0.9831$ = pérdida ~1.69%.
+- **Precisión**: factor diario (0.8^(1/365)) + Taylor con ln(0.8) para fracciones < 24h; sin exploits por timing.
 - **Sin yield**: no hay reparto de fees ni intereses; la posible apreciación deriva de reducción de unidades.
 - **Refugio**: stake = 0% burn; al volver a libre, reloj reinicia en `now`.
 

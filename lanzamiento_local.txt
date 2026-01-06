@@ -1,0 +1,528 @@
+═══════════════════════════════════════════════════════════════════════════════
+  OXIDE LOCAL TESTNET — DEPLOYMENT & TESTING
+═══════════════════════════════════════════════════════════════════════════════
+
+Prerequisitos completados:
+✅ WSL2 Ubuntu 22.04
+✅ Build tools (gcc, clang, libssl, libudev)
+✅ Node.js 20 + pnpm 8
+✅ Rust toolchain + bpfel-unknown-unknown target
+✅ Solana CLI 1.18.x
+✅ Anchor CLI 0.30.1 (actualizado desde 0.29.0)
+✅ PATH configurado (~/.cargo/bin y solana/bin en ~/.bashrc)
+
+
+FASE 1 – PREPARACIÓN DEL PROYECTO (WSL)
+───────────────────────────────────────────────────────────────────────────────
+
+1. Navega al directorio del proyecto
+   $ cd /mnt/c/Users/th3vil/Desktop/github/OXIDE
+
+
+2. Instala dependencias Node.js
+   $ pnpm install --frozen-lockfile
+   
+   Esto instalará:
+   - @coral-xyz/anchor 0.30.1
+   - @solana/web3.js
+   - @solana/spl-token
+   - TypeScript y ts-node
+   
+   Expected: node_modules/ populated, sin errores
+
+
+3. Verifica herramientas instaladas
+   $ rustc --version
+   # rustc 1.75.0
+   
+   $ anchor --version
+   # anchor-cli 0.30.1
+   
+   $ solana --version
+   # solana-cli 1.18.26
+   
+   $ spl-token --version
+   # spl-token-cli 3.4.1
+   
+   $ pnpm --version
+   # 8.15.9
+   
+   ✅ Todas las versiones deben coincidir
+
+
+FASE 2 – GENERAR KEYPAIRS DE PROGRAMA (SOLO PRIMERA VEZ)
+───────────────────────────────────────────────────────────────────────────────
+
+4. Genera keypairs para los programas (si no existen)
+   
+   Programa principal (OXIDE):
+   $ solana-keygen new -o target/deploy/oxide-keypair.json --force
+   
+   Programa hook:
+   $ solana-keygen new -o target/deploy/oxide_transfer_hook-keypair.json --force
+   
+   ⚠️ IMPORTANTE: Guarda estos keypairs de forma segura
+   - NO los subas a git (están en .gitignore)
+   - Los necesitarás para actualizar el programa después
+
+
+5. Obtén las direcciones de los programas
+   
+   $ OXIDE_PROGRAM_ID=$(solana address -k target/deploy/oxide-keypair.json)
+   $ HOOK_PROGRAM_ID=$(solana address -k target/deploy/oxide_transfer_hook-keypair.json)
+   
+   $ echo "OXIDE Program ID: $OXIDE_PROGRAM_ID"
+   $ echo "Hook Program ID: $HOOK_PROGRAM_ID"
+   
+   Ejemplo de salida:
+   OXIDE Program ID: 5amCTzFY1j7PSfKfb4vvCvQeJJPXwRBCaZBVL8PZM4qV
+   Hook Program ID: HookProg3xXxXxXxXxXxXxXxXxXxXxXxXxXxXxXxXxXx
+
+
+6. Actualiza los Program IDs en el código fuente
+   
+   Abre lib.rs (programa OXIDE):
+   - Línea ~16: declare_id!("TU_OXIDE_PROGRAM_ID_AQUI");
+   
+   Abre hook_lib.rs (programa Hook):
+   - Línea ~15: declare_id!("TU_HOOK_PROGRAM_ID_AQUI");
+   
+   Abre lib.rs otra vez (constante HOOK_PROGRAM_ID):
+   - Línea ~20: const HOOK_PROGRAM_ID: Pubkey = pubkey!("TU_HOOK_PROGRAM_ID_AQUI");
+   
+   ⚠️ CRITICAL: Los tres IDs deben coincidir EXACTAMENTE
+   
+   Ejemplo completo (reemplaza con tus IDs):
+   
+   En lib.rs (línea 16):
+   declare_id!("5amCTzFY1j7PSfKfb4vvCvQeJJPXwRBCaZBVL8PZM4qV");
+   
+   En hook_lib.rs (línea 15):
+   declare_id!("HookProg3xXxXxXxXxXxXxXxXxXxXxXxXxXxXxXxXxXx");
+   
+   En lib.rs (línea 20):
+   const HOOK_PROGRAM_ID: Pubkey = pubkey!("HookProg3xXxXxXxXxXxXxXxXxXxXxXxXxXxXxXxXxXx");
+
+
+FASE 3 – BUILD LOCAL (PRIMERA COMPILACIÓN)
+───────────────────────────────────────────────────────────────────────────────
+
+7. Compila el proyecto con Anchor
+   $ anchor build
+   
+   Esto genera:
+  - target/deploy/oxide.so (programa principal)
+  - target/deploy/oxide_transfer_hook.so (hook)
+   
+  ⚠️ NOTA IMPORTANTE: Por incompatibilidad entre Anchor 0.30.1 y Rust 1.75+, NO se genera la IDL (target/idl/*.json). Los scripts TypeScript y la integración Anchor/TS quedan temporalmente deshabilitados. Usa CLI y tests Rust para interactuar con el programa.
+   
+   Expected output:
+   ...
+   Finished release [optimized] target(s) in X.XXs
+   
+   ✅ Build exitoso sin errores
+   ❌ Si hay errores, revisa que los Program IDs estén actualizados
+
+
+8. Verifica los archivos generados
+   $ ls -lh target/deploy/*.so
+   # oxide.so (~200-300 KB)
+   # oxide_transfer_hook.so (~100-150 KB)
+   
+   $ ls -lh target/idl/*.json
+   # oxide.json
+   # oxide_transfer_hook.json
+
+
+FASE 4 – TESTS LOCALES (SIN VALIDADOR AÚN)
+───────────────────────────────────────────────────────────────────────────────
+
+9. Ejecuta tests unitarios (pura lógica Rust, < 1 segundo)
+   $ cargo test --test unit_tests -- --nocapture
+   
+   Expected: ✅ ALL PASS
+   Tests incluidos:
+   - test_burn_calculation_basic
+   - test_burn_calculation_zero_elapsed
+   - test_burn_calculation_one_day
+   - test_burn_calculation_max_u64
+   - test_burn_with_fractional_balance
+   - test_timestamp_tracking_weighted_average
+   - test_timestamp_tracking_reset_on_withdraw
+   - test_timestamp_tracking_inheritance
+   - test_grace_period_14_59
+   - test_grace_period_15_00
+   - test_grace_period_15_01
+   - test_genesis_airdrop_supply_cap
+   - test_daily_release_cap
+   - ...y más
+   
+   ⚠️ Si alguno falla → DEBUG antes de continuar
+
+
+10. Ejecuta tests de casos extremos (CRÍTICO, < 10 segundos)
+    $ cargo test --test edge_case_tests -- --nocapture --test-threads=1
+    
+    Expected: ✅ ALL PASS
+    Tests CRÍTICOS de seguridad:
+    - edge_case_max_u64_balance → overflow protection
+    - edge_case_elapsed_negative → clock regression safe
+    - edge_case_timestamp_overflow → u64::MAX handling
+    - edge_case_grace_period_boundary → exactamente 15 min
+    - edge_case_hook_program_id_immutable → security constant
+    - edge_case_zero_balance_deposit
+    - edge_case_withdraw_entire_balance
+    - edge_case_consecutive_deposits
+    - edge_case_burn_remainder_accumulation
+    - ...y más
+    
+    🔴 NO CONTINUAR SI ALGUNO FALLA
+    Estos tests detectan bugs críticos que romperían mainnet
+
+
+FASE 5 – VALIDADOR LOCAL Y DEPLOY
+───────────────────────────────────────────────────────────────────────────────
+
+11. Inicia validador local en una terminal separada
+    
+    Terminal 1 (WSL):
+    $ solana-test-validator --reset
+    
+    Expected output:
+    Ledger location: test-ledger
+    Log: test-ledger/validator.log
+    Identity: <pubkey>
+    Genesis Hash: <hash>
+    Version: 1.18.21
+    Shred Version: 13490
+    Gossip Address: 127.0.0.1:1024
+    TPU Address: 127.0.0.1:1027
+    JSON RPC URL: http://127.0.0.1:8899
+    WebSocket PubSub URL: ws://127.0.0.1:8900
+    
+    ✅ Validador corriendo (deja esta terminal abierta)
+
+
+12. En una nueva terminal, configura Solana CLI para localhost
+    
+    Terminal 2 (WSL):
+    $ cd /mnt/c/Users/th3vil/Desktop/github/OXIDE
+    
+    $ solana config set --url http://localhost:8899
+    $ solana config get
+    
+    Output:
+    RPC URL: http://localhost:8899
+    WebSocket URL: ws://localhost:8900/ (computed)
+    Keypair Path: ~/.config/solana/id.json
+    Commitment: confirmed
+
+
+13. Fondea tu keypair local (airdrop)
+    $ solana airdrop 100
+    $ solana balance
+    # 100 SOL
+    
+    Fondea los program keypairs:
+    $ solana airdrop 10 $(solana address -k target/deploy/oxide-keypair.json)
+    $ solana airdrop 10 $(solana address -k target/deploy/oxide_transfer_hook-keypair.json)
+
+
+14. Deploy del hook PRIMERO (dependencia del programa principal)
+    $ anchor deploy --program-name oxide_transfer_hook
+    
+    O manualmente:
+    $ solana program deploy \
+      --program-id target/deploy/oxide_transfer_hook-keypair.json \
+      target/deploy/oxide_transfer_hook.so
+    
+    Expected:
+    Program Id: HookProg... (tu HOOK_PROGRAM_ID)
+    
+    Verifica:
+    $ solana program show $(solana address -k target/deploy/oxide_transfer_hook-keypair.json)
+
+
+15. Deploy del programa principal OXIDE
+    $ anchor deploy --program-name oxide
+    
+    O manualmente:
+    $ solana program deploy \
+      --program-id target/deploy/oxide-keypair.json \
+      target/deploy/oxide.so
+    
+    Expected:
+    Program Id: 5amCTzFY... (tu OXIDE_PROGRAM_ID)
+    
+    Verifica:
+    $ solana program show $(solana address -k target/deploy/oxide-keypair.json)
+    
+    ✅ Ambos programas desplegados en localhost
+
+
+FASE 6 – CREAR MINT TOKEN-2022 CON TRANSFER HOOK
+───────────────────────────────────────────────────────────────────────────────
+
+16. Crea el mint Token-2022 (6 decimales, con hook)
+    
+    $ spl-token create-token \
+      --program-id TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxLZ8 \
+      --decimals 6 \
+      --url http://localhost:8899
+    
+    Output:
+    Creating token <MINT_ID>
+    
+    Guarda el MINT_ID:
+    $ export MINT_ID=<tu_mint_address>
+    $ echo "Mint ID: $MINT_ID"
+
+
+17. Inicializa la extensión transfer hook en el mint
+    
+    $ spl-token initialize-mint-extension \
+      $MINT_ID \
+      transfer-hook \
+      $(solana address -k target/deploy/oxide_transfer_hook-keypair.json) \
+      --url http://localhost:8899
+    
+    Expected: Hook extension initialized
+    
+    Verifica:
+    $ spl-token display $MINT_ID --url http://localhost:8899
+    # Output debe mostrar: Transfer Hook Program: HookProg...
+
+
+18. Establece la mint authority al programa OXIDE (GLOBAL_PDA)
+    
+    Primero calcula el GLOBAL_PDA:
+    $ pnpm run pda:global -- --program $(solana address -k target/deploy/oxide-keypair.json)
+    
+    Output:
+    Global PDA: <GLOBAL_PDA_ADDRESS>
+    
+    $ export GLOBAL_PDA=<global_pda_address>
+    
+    Transfiere mint authority:
+    $ spl-token authorize \
+      $MINT_ID \
+      mint \
+      $GLOBAL_PDA \
+      --url http://localhost:8899
+    
+    Verifica:
+    $ spl-token display $MINT_ID --url http://localhost:8899
+    # Mint authority: <GLOBAL_PDA>
+
+
+FASE 7 – INICIALIZACIÓN ON-CHAIN (SCRIPTS TYPESCRIPT)
+───────────────────────────────────────────────────────────────────────────────
+
+19. ⚠️ SCRIPTS TYPESCRIPT DESHABILITADOS
+   
+  Debido a la falta de IDL, los scripts TypeScript (init:global, verify:mint, init:hook) NO funcionarán. La integración Anchor/TypeScript queda pausada hasta que Anchor sea compatible con Rust 1.75+ y se pueda generar la IDL.
+   
+  Alternativas:
+  - Usa los tests Rust y la CLI Python para interactuar y validar el programa.
+  - Si necesitas inicializar el estado global, mint authority, o el hook, implementa scripts en Rust o Python usando solana-py/web3.js sin Anchor.
+  - Mantente atento a actualizaciones de Anchor para restaurar la integración TypeScript.
+
+
+FASE 8 – TESTS DE INTEGRACIÓN (CON VALIDADOR LOCAL)
+───────────────────────────────────────────────────────────────────────────────
+
+22. Ejecuta tests de integración (Rust)
+   
+  $ cargo test --test integration_tests -- --nocapture --test-threads=1
+   
+  Expected: ✅ ALL PASS
+   
+  Los tests de integración en Rust validan la lógica on-chain y la interacción entre cuentas. Si necesitas tests adicionales, implementa nuevos casos en /tests/integration_tests.rs.
+   
+  Si todos pasan: ✅ OXIDE funciona correctamente en local
+  Si alguno falla: ❌ DEBUG antes de deploy a DEVNET
+
+
+23. (Opcional) Tests de integración manuales con Rust
+    $ cargo test --test integration_tests -- --nocapture --test-threads=1
+    
+    Requiere validador local corriendo
+
+
+FASE 9 – SMOKE TESTS MANUALES (OXIDE_CLI.PY)
+───────────────────────────────────────────────────────────────────────────────
+
+24. Deposita tokens (crear tracking account)
+    
+    $ python cli/oxide_cli.py \
+      --program-id $(solana address -k target/deploy/oxide-keypair.json) \
+      --mint $MINT_ID \
+      --url http://localhost:8899 \
+      deposit \
+      --amount 1000
+    
+    Expected:
+    ✅ Deposited 1000 OXD
+    ✅ Tracking account created
+    Balance: 1000000000 (1000 OXD en unidades base)
+
+
+25. Espera 15+ minutos (grace period) y retira
+    
+    # Simula el tiempo (en producción esperarías 15 min reales)
+    # En local puedes ajustar el clock del validador si es necesario
+    
+    $ python cli/oxide_cli.py \
+      --program-id $(solana address -k target/deploy/oxide-keypair.json) \
+      --mint $MINT_ID \
+      --url http://localhost:8899 \
+      withdraw \
+      --amount 500
+    
+    Expected:
+    ✅ Withdrawn 500 OXD
+    Burn applied: X.XX OXD (depende del tiempo transcurrido)
+    Remaining balance: ~500 OXD
+
+
+26. Clear debt (resetea timestamp)
+    
+    $ python cli/oxide_cli.py \
+      --program-id $(solana address -k target/deploy/oxide-keypair.json) \
+      --mint $MINT_ID \
+      --url http://localhost:8899 \
+      clear-debt
+    
+    Expected:
+    ✅ Debt cleared
+    ✅ Timestamp reset to current time
+
+
+FASE 10 – VALIDACIÓN FINAL
+───────────────────────────────────────────────────────────────────────────────
+
+27. Checklist de validación local
+
+  ✅ anchor build sin errores
+  ✅ Todos los unit tests pasan (cargo test --test unit_tests)
+  ✅ Todos los edge case tests pasan (cargo test --test edge_case_tests)
+  ✅ Todos los integration tests pasan (cargo test --test integration_tests)
+  ✅ Hook program deployado y activo
+  ✅ Mint Token-2022 creado con transfer hook
+  ✅ Mint authority = GLOBAL_PDA
+  ✅ deposit/withdraw/clear_debt funcionan via CLI
+  ✅ Burn calculations correctas
+  ✅ Tracking accounts sincronizados
+  ✅ Pool whitelisting funciona (0% burn)
+  ✅ User transfers aplican burn
+  ✅ Delegate transfers bloqueados
+
+  ⚠️ initialize_global, verify_mint_authority, init_hook via TypeScript quedan pausados hasta restaurar la IDL.
+
+  Si todos ✅ → Listo para DEVNET
+  Si alguno ❌ → Debug y re-test
+
+
+FASE 11 – PREPARACIÓN PARA DEVNET
+───────────────────────────────────────────────────────────────────────────────
+
+28. Limpia el entorno local
+    
+    Detén el validador local (Ctrl+C en Terminal 1)
+    
+    $ rm -rf test-ledger/
+    $ solana config set --url https://api.devnet.solana.com
+
+
+29. Lee lanzamiento_devnet.txt
+    
+    $ cat lanzamiento_devnet.txt
+    
+    Sigue los pasos para deploy en DEVNET
+
+
+═══════════════════════════════════════════════════════════════════════════════
+TROUBLESHOOTING COMÚN
+═══════════════════════════════════════════════════════════════════════════════
+
+Error: "Program failed to complete: Insufficient funds"
+→ Solución: solana airdrop 10
+
+Error: "Error: Account already exists"
+→ Solución: anchor test --skip-deploy (o --reset)
+
+Error: "InvalidHookProgram"
+→ Solución: Verifica que HOOK_PROGRAM_ID en lib.rs coincida con hook_lib.rs
+
+Error: "Transaction simulation failed: Program failed to deploy"
+→ Solución: solana program close <old_program_id> y vuelve a deploy
+
+Error: "anchor test fails with 'IDL not found'"
+→ Solución: anchor build primero para generar target/idl/*.json
+
+Error: "TypeError: anchor.workspace is undefined"
+→ Solución: Verifica que Anchor.toml tenga [programs.localnet] correcto
+
+Error: "pnpm run X fails with 'command not found'"
+→ Solución: Verifica package.json scripts y que pnpm install haya corrido
+
+Error: "cargo test fails with 'no tests to run'"
+→ Solución: Los tests están en /tests directory, usa --test <nombre>
+
+Error: "unit tests pass but integration tests fail"
+→ Solución: Asegura que validador local esté corriendo y deploy exitoso
+
+Error: "spl-token: command not found"
+→ Solución: export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+           source ~/.bashrc
+
+═══════════════════════════════════════════════════════════════════════════════
+RESUMEN DE COMANDOS (QUICK REFERENCE)
+═══════════════════════════════════════════════════════════════════════════════
+
+# Setup inicial
+pnpm install --frozen-lockfile
+anchor build
+
+# Generar Program IDs (solo una vez)
+solana-keygen new -o target/deploy/oxide-keypair.json --force
+solana-keygen new -o target/deploy/oxide_transfer_hook-keypair.json --force
+solana address -k target/deploy/oxide-keypair.json
+solana address -k target/deploy/oxide_transfer_hook-keypair.json
+
+# Tests sin blockchain
+cargo test --test unit_tests -- --nocapture
+cargo test --test edge_case_tests -- --nocapture --test-threads=1
+
+# Iniciar validador (terminal separado)
+solana-test-validator --reset
+
+# Deploy local
+solana config set --url http://localhost:8899
+solana airdrop 100
+anchor deploy
+
+# Crear mint
+spl-token create-token --program-id TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxLZ8 --decimals 6
+spl-token initialize-mint-extension <MINT_ID> transfer-hook <HOOK_ID>
+
+# Inicializar
+⚠️ Scripts TypeScript deshabilitados: omite los comandos que requieren --idl o integración Anchor/TS.
+
+# Tests con blockchain
+cargo test --test integration_tests -- --nocapture --test-threads=1
+
+# CLI manual
+python cli/oxide_cli.py --program-id <PROGRAM_ID> --mint <MINT_ID> --url http://localhost:8899 deposit --amount 1000
+python cli/oxide_cli.py --program-id <PROGRAM_ID> --mint <MINT_ID> --url http://localhost:8899 withdraw --amount 500
+python cli/oxide_cli.py --program-id <PROGRAM_ID> --mint <MINT_ID> --url http://localhost:8899 clear-debt
+
+═══════════════════════════════════════════════════════════════════════════════
+PRÓXIMOS PASOS
+═══════════════════════════════════════════════════════════════════════════════
+
+1. Completa FASE 1-10 en este documento (local testnet)
+2. Lee lanzamiento_devnet.txt para deploy a DEVNET
+3. Lee lanzamiento.txt para deploy a MAINNET (solo después de auditar DEVNET)
+
+═══════════════════════════════════════════════════════════════════════════════

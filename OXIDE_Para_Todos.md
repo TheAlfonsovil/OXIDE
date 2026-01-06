@@ -15,7 +15,7 @@ Imagina que tienes dinero en efectivo debajo del colchón. Con el tiempo:
 **La solución es simple:**
 1. **Stakea** tus OXIDE (como meter el dinero en una caja fuerte) → **0% oxidación, nada desaparece**
 2. **Úsalos para trading activo** en pools de liquidez → **0% oxidación** (zona protegida)
-3. **Déjalos en tu wallet sin hacer nada** → Se oxidan 20% anual (proporcional al tiempo)
+3. **Déjalos en tu wallet sin hacer nada** → Decay exponencial: 20% el 1er año, ~67% a los 5 años, ~89% a los 10 años
 
 **TÚ eliges cómo proteger tu dinero. El protocolo solo penaliza la inactividad.**
 
@@ -134,7 +134,7 @@ python oxide_cli.py stake --amount 1000
 **Ejemplo:**
 ```
 Compras 1000 OXIDE → Los dejas en wallet 1 año sin tocar
-Resultado: ~800 OXIDE (perdiste 200 por oxidación del 20% anual)
+Resultado: ~800 OXIDE (decay exponencial: 1000 × 0.8¹ = 800)
 ```
 
 **Solución:** Stakea inmediatamente después de comprar si no vas a usar
@@ -222,7 +222,7 @@ python oxide_cli.py withdraw --amount 500
 
 | Proyecto | Mecanismo | Realidad |
 |----------|-----------|----------|
-| **OXIDE** | 20% anual automático sobre inactivos | ✅ Matemático, verificable, inmutable |
+| **OXIDE** | Decay exponencial 20% anual sobre inactivos | ✅ Matemático (0.8^años), verificable, inmutable |
 | **BNB** | "Burn trimestral según ganancias" | ⚠️ Centralizado, Binance decide cuánto |
 | **SHIB** | "Burn comunitario voluntario" | ❌ Depende de holders quemando sus tokens |
 | **LUNA v1** | "Burn algorítmico con UST" | 💀 Colapsó (muerte en espiral) |

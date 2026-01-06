@@ -48,7 +48,13 @@ coverage/
 # Anchor/solana local artifacts
 # (keep IDLs if you want to commit them; adjust as necessary)
 /.local/
+/.anchor/
+/test-ledger/
+Cargo.lock
 
-# Ignore the installer binary if you don't want it in repo
-solana-install-init-*
+# Anchor program keypairs (CRITICAL: DO NOT COMMIT)
+**/target/deploy/*-keypair.json
+!**/target/deploy/.gitkeep
+
+
 
